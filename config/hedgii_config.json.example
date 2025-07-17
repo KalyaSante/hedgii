@@ -1,0 +1,46 @@
+{
+  "backup_sources": [
+    {
+      "source": "/var/www/html",
+      "destination": "web/html",
+      "description": "Website files"
+    },
+    {
+      "source": "/var/www/api",
+      "destination": "web/api", 
+      "description": "API backend"
+    },
+    {
+      "source": "/etc/nginx/sites-available",
+      "destination": "config/nginx",
+      "description": "Nginx configuration"
+    },
+    {
+      "source": "/etc/php/8.2/fpm/php.ini",
+      "destination": "config/php.ini",
+      "description": "PHP configuration"
+    },
+    {
+      "source": "/home/user/.ssh/authorized_keys",
+      "destination": "security/ssh_keys",
+      "description": "SSH authorized keys"
+    }
+  ],
+  "exclusions": [
+    "*.tmp",
+    "*.log.old",
+    "node_modules",
+    ".git",
+    "*.cache"
+  ],
+  "settings": {
+    "retention_days": 14,
+    "staging_dir": "/tmp/hedgii_staging",
+    "backup_dir": "/var/backups/hedgii",
+    "encrypt_passphrase_file": "/etc/hedgii/passphrase",
+    "rclone_remote": "onedrive:backups/",
+    "max_file_size": "100M",
+    "preserve_permissions": true,
+    "follow_symlinks": false
+  }
+}
