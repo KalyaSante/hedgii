@@ -1,0 +1,170 @@
+# 🦔 Hedgii .gitignore - Protecting your secrets like a kawaii guardian!
+
+# === SENSITIVE DATA - NEVER COMMIT THESE! ===
+# GPG passphrases and encryption keys
+*.passphrase
+*_passphrase
+gpg_passphrase
+*.key
+*.gpg
+*.asc
+
+# Configuration files with sensitive data
+hedgii_config.json
+/config/hedgii_config.json
+/etc/hedgii/
+
+# === BACKUP FILES ===
+# Encrypted backup files
+*.gpg
+backup_*.tar.gz
+hedgii_backup_*
+
+# Staging directories
+/tmp/hedgii_staging/
+*_staging/
+staging/
+
+# Local backup directories
+/var/backups/hedgii/
+backups/
+*.backup
+
+# === LOG FILES ===
+# Hedgii logs
+/var/log/hedgii/
+*.log
+logs/
+hedgii_*.log
+
+# System logs that might be copied
+*.log.*
+*.out
+*.err
+
+# === TEMPORARY FILES ===
+# Bash temporary files
+*.tmp
+*.temp
+.tmp*
+temp_*
+
+# Script temporary files
+/tmp/hedgii_*
+*_temp.sh
+
+# === SYSTEM FILES ===
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Linux
+.directory
+*~
+
+# === EDITOR FILES ===
+# JetBrains IDEs
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# VS Code
+.vscode/
+*.code-workspace
+
+# Vim
+*.swp
+*.swo
+*.un~
+.netrwhist
+
+# Emacs
+*~
+\#*\#
+/.emacs.desktop
+/.emacs.desktop.lock
+*.elc
+auto-save-list
+tramp
+.\#*
+
+# Nano
+*.save
+*.orig
+
+# === DEVELOPMENT FILES ===
+# Node.js (if using for tooling)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Python (if using for tooling)
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+pip-log.txt
+pip-delete-this-directory.txt
+
+# === TESTING FILES ===
+# Test outputs
+test_output/
+test_results/
+*.test
+test_*.log
+
+# Coverage reports
+coverage/
+*.cover
+.coverage
+
+# === DOCUMENTATION BUILD FILES ===
+# Generated docs
+docs/_build/
+docs/build/
+site/
+
+# === RCLONE FILES ===
+# Rclone config (contains tokens)
+rclone.conf
+.rclone.conf
+
+# === CUSTOM EXCLUSIONS ===
+# Add your custom files here
+# my_custom_script.sh
+# local_config.json
+
+# === HEDGII SPECIFIC ===
+# Installation artifacts
+install.log
+setup.log
+
+# Migration files
+migration_*.sql
+*.migrate
+
+# Custom command outputs (if testing locally)
+custom_output/
+command_test/
+
+# === KEEP THESE FILES ===
+# (Using negative patterns to ensure important files aren't ignored)
+!README.md
+!LICENSE
+!CHANGELOG.md
+!CONTRIBUTING.md
+!.github/
+!docs/
+!examples/
+!config/*.example
+!config/templates/

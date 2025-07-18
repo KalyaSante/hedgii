@@ -3,44 +3,127 @@
     {
       "source": "/var/www/html",
       "destination": "web/html",
-      "description": "Website files"
+      "description": "🌐 Main website files"
     },
     {
       "source": "/var/www/api",
-      "destination": "web/api", 
-      "description": "API backend"
+      "destination": "web/api",
+      "description": "🚀 API backend"
     },
     {
       "source": "/etc/nginx/sites-available",
       "destination": "config/nginx",
-      "description": "Nginx configuration"
+      "description": "⚙️ Nginx configuration"
     },
     {
       "source": "/etc/php/8.2/fpm/php.ini",
       "destination": "config/php.ini",
-      "description": "PHP configuration"
+      "description": "🐘 PHP configuration"
     },
     {
-      "source": "/home/user/.ssh/authorized_keys",
+      "source": "/var/log/nginx/access.log",
+      "destination": "logs/nginx_access.log",
+      "description": "📊 Nginx access logs"
+    },
+    {
+      "source": "/home/damien/.ssh/authorized_keys",
       "destination": "security/ssh_keys",
-      "description": "SSH authorized keys"
+      "description": "🔐 SSH authorized keys"
     }
   ],
+  "custom_commands": [
+    {
+      "command": "mysqldump --all-databases --single-transaction --routines --triggers",
+      "description": "📊 Complete MySQL database dump",
+      "output_file": "databases/mysql_full_dump.sql",
+      "timeout": 600,
+      "working_dir": "/tmp",
+      "continue_on_error": false
+    },
+    {
+      "command": "mysqldump --all-databases --no-data --routines --triggers",
+      "description": "🗂️ MySQL structure-only dump",
+      "output_file": "databases/mysql_structure.sql",
+      "timeout": 300,
+      "working_dir": "/tmp",
+      "continue_on_error": true
+    },
+    {
+      "command": "docker ps -a --format 'table {{.Names}}\\t{{.Image}}\\t{{.Status}}\\t{{.Ports}}'",
+      "description": "🐳 Docker containers status",
+      "output_file": "system/docker_containers.txt",
+      "timeout": 60,
+      "working_dir": "/tmp",
+      "continue_on_error": true
+    },
+    {
+      "command": "systemctl list-units --type=service --state=active --no-pager",
+      "description": "🔧 Active system services",
+      "output_file": "system/active_services.txt",
+      "timeout": 30,
+      "working_dir": "/tmp",
+      "continue_on_error": true
+    },
+    {
+      "command": "crontab -l",
+      "description": "⏰ User cron jobs",
+      "output_file": "system/user_crontab.txt",
+      "timeout": 10,
+      "working_dir": "/tmp",
+      "continue_on_error": true
+    },
+    {
+      "command": "dpkg --get-selections",
+      "description": "📦 Installed packages list",
+      "output_file": "system/installed_packages.txt",
+      "timeout": 60,
+      "working_dir": "/tmp",
+      "continue_on_error": true
+    },
+    {
+      "command": "git log --oneline --graph -10",
+      "description": "🌳 Recent git commits",
+      "output_file": "development/recent_commits.txt",
+      "timeout": 30,
+      "working_dir": "/var/www/html",
+      "continue_on_error": true
+    },
+    {
+      "command": "composer show --installed --format=json",
+      "description": "🎼 Composer dependencies",
+      "output_file": "development/composer_packages.json",
+      "timeout": 120,
+      "working_dir": "/var/www/html",
+      "continue_on_error": true
+    },
+    {
+      "command": "pg_dumpall --clean --if-exists",
+      "description": "🐘 PostgreSQL full dump",
+      "output_file": "databases/postgresql_dump.sql",
+      "timeout": 900,
+      "working_dir": "/tmp",
+      "continue_on_error": true
+    },
+    {
+      "command": "redis-cli --scan --pattern '*' | head -100",
+      "description": "🔴 Redis keys sample",
+      "output_file": "databases/redis_keys_sample.txt",
+      "timeout": 30,
+      "working_dir": "/tmp",
+      "continue_on_error": true
+    }
+  ],
+  "settings": {
+    "staging_dir": "/tmp/hedgii_staging",
+    "backup_dir": "/var/backups/hedgii",
+    "encrypt_passphrase_file": "/etc/hedgii/gpg_passphrase",
+    "rclone_remote": "onedrive:hedgii-backups/"
+  },
   "exclusions": [
     "*.tmp",
     "*.log.old",
     "node_modules",
     ".git",
     "*.cache"
-  ],
-  "settings": {
-    "retention_days": 14,
-    "staging_dir": "/tmp/hedgii_staging",
-    "backup_dir": "/var/backups/hedgii",
-    "encrypt_passphrase_file": "/etc/hedgii/passphrase",
-    "rclone_remote": "onedrive:backups/",
-    "max_file_size": "100M",
-    "preserve_permissions": true,
-    "follow_symlinks": false
-  }
+  ]
 }

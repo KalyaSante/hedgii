@@ -99,13 +99,121 @@ copy_resource() {
     fi
 }
 
-# Process all backup sources
-process_sources() {
+# Execute custom commands before backup
+execute_custom_commands() {
     local staging_dir="$1"
+    local custom_commands=$(jq -r '.custom_commands // []' "$CONFIG_FILE")
+    
+    if [[ "$custom_commands" == "[]" ]]; then
+        hedgii_log "INFO" "No custom commands configured"
+        return 0
+    fi
+    
+    local commands_count=$(jq '.custom_commands | length' "$CONFIG_FILE")
+    hedgii_log "KAWAII" "🦔 Running $commands_count custom commands to gather special data! ✨"
+    
+    local success_count=0
+    local failed_count=0
+    
+    for i in $(seq 0 $((commands_count - 1))); do
+        local command=$(jq -r ".custom_commands[$i].command" "$CONFIG_FILE")
+        local description=$(jq -r ".custom_commands[$i].description" "$CONFIG_FILE")
+        local output_file=$(jq -r ".custom_commands[$i].output_file" "$CONFIG_FILE")
+        local timeout=$(jq -r ".custom_commands[$i].timeout // 300" "$CONFIG_FILE")
+        local working_dir=$(jq -r ".custom_commands[$i].working_dir // \"/tmp\"" "$CONFIG_FILE")
+        local continue_on_error=$(jq -r ".custom_commands[$i].continue_on_error // true" "$CONFIG_FILE")
+        
+        hedgii_log "INFO" "🔧 Executing: $description"
+        hedgii_log "INFO" "  Command: $command"
+        hedgii_log "INFO" "  Output: $output_file"
+        
+        # Create output directory in staging
+        local output_path="$staging_dir/$(dirname "$output_file")"
+        mkdir -p "$output_path"
+        
+        # Full output file path
+        local full_output_path="$staging_dir/$output_file"
+        
+        # Execute command with timeout
+        if execute_command_with_timeout "$command" "$working_dir" "$timeout" "$full_output_path"; then
+            hedgii_log "INFO" "  ✓ Command successful"
+            ((success_count++))
+        else
+            hedgii_log "ERROR" "  ✗ Command failed"
+            ((failed_count++))
+            
+            if [[ "$continue_on_error" == "false" ]]; then
+                hedgii_log "ERROR" "Stopping execution due to failed command"
+                return 1
+            fi
+        fi
+        
+        echo "" # Spacing for readability
+    done
+    
+    hedgii_log "INFO" "Custom commands completed: $success_count success, $failed_count failed"
+    return 0
+}
+
+# Execute a command with timeout and proper error handling
+execute_command_with_timeout() {
+    local command="$1"
+    local working_dir="$2"
+    local timeout="$3"
+    local output_file="$4"
+    
+    # Create a temporary script for the command
+    local temp_script=$(mktemp)
+    cat > "$temp_script" << EOF
+#!/bin/bash
+cd "$working_dir"
+$command
+EOF
+    chmod +x "$temp_script"
+    
+    # Execute with timeout
+    if timeout "$timeout" bash "$temp_script" > "$output_file" 2>&1; then
+        local exit_code=$?
+        rm -f "$temp_script"
+        
+        # Check if output file was created and has content
+        if [[ -f "$output_file" && -s "$output_file" ]]; then
+            local file_size=$(stat -c%s "$output_file")
+            hedgii_log "INFO" "  Output size: $(numfmt --to=iec --suffix=B $file_size)"
+            return 0
+        else
+            hedgii_log "WARN" "  Command succeeded but no output generated"
+            return 0
+        fi
+    else
+        local exit_code=$?
+        rm -f "$temp_script"
+        
+        if [[ $exit_code -eq 124 ]]; then
+            hedgii_log "ERROR" "  Command timed out after ${timeout}s"
+        else
+            hedgii_log "ERROR" "  Command failed with exit code $exit_code"
+        fi
+        
+        return 1
+    fi
+}
+
+# Enhanced process_sources function to include custom commands
+process_sources_with_commands() {
+    local staging_dir="$1"
+    
+    hedgii_log "KAWAII" "🦔 Hedgii is gathering all your precious data! (｡◕‿◕｡)"
+    
+    # Execute custom commands first
+    if ! execute_custom_commands "$staging_dir"; then
+        hedgii_log "ERROR" "Custom commands failed, aborting backup"
+        return 1
+    fi
+    
+    # Then process regular file sources
     local total_sources=$(jq '.backup_sources | length' "$CONFIG_FILE")
     local success_count=0
-    
-    hedgii_log "KAWAII" "Starting to curl up your precious data! (｡◕‿◕｡)"
     
     for i in $(seq 0 $((total_sources - 1))); do
         local source=$(jq -r ".backup_sources[$i].source" "$CONFIG_FILE")
@@ -117,7 +225,47 @@ process_sources() {
         fi
     done
     
-    hedgii_log "INFO" "Data collection complete: $success_count/$total_sources successful"
+    hedgii_log "INFO" "Data collection complete: $success_count/$total_sources file sources successful"
+    return 0
+}
+
+# Generate a comprehensive backup report
+generate_backup_report() {
+    local staging_dir="$1"
+    local report_file="$staging_dir/hedgii_backup_report.txt"
+    
+    hedgii_log "INFO" "Generating kawaii backup report..."
+    
+    cat > "$report_file" << EOF
+🦔 ===== HEDGII BACKUP REPORT ===== 🦔
+Generated: $(date)
+Server: $(hostname)
+User: $(whoami)
+Hedgii Version: 1.0-kawaii
+
+🎯 BACKUP SUMMARY:
+Total files: $(find "$staging_dir" -type f | wc -l)
+Total directories: $(find "$staging_dir" -type d | wc -l)
+Total size: $(du -sh "$staging_dir" | cut -f1)
+
+📁 BACKUP CONTENTS:
+$(find "$staging_dir" -type f -exec ls -lh {} \; | head -20)
+
+🔧 CUSTOM COMMANDS EXECUTED:
+$(jq -r '.custom_commands[]? | "- " + .description + " → " + .output_file' "$CONFIG_FILE" 2>/dev/null || echo "No custom commands")
+
+📋 CONFIGURATION USED:
+$(cat "$CONFIG_FILE" | jq '.')
+
+🦔 Hedgii says: Your data is safe and sound! ✨
+EOF
+
+    hedgii_log "INFO" "Report generated: hedgii_backup_report.txt"
+}
+
+# Process all backup sources (legacy function for compatibility)
+process_sources() {
+    process_sources_with_commands "$1"
 }
 
 # Encrypt the staging directory
@@ -162,12 +310,20 @@ upload_to_cloud() {
 
 # Main backup function
 hedgii_curl() {
-    hedgii_log "KAWAII" "🦔 Hedgii is ready to protect your data! ✨"
+    hedgii_log "KAWAII" "🦔 Hedgii is ready to protect your data with custom powers! ✨"
     
     check_dependencies
     
     local staging_dir=$(cleanup_staging)
-    process_sources "$staging_dir"
+    
+    # Use enhanced processing with custom commands
+    if ! process_sources_with_commands "$staging_dir"; then
+        hedgii_log "ERROR" "Data collection failed!"
+        exit 1
+    fi
+    
+    # Generate comprehensive report
+    generate_backup_report "$staging_dir"
     
     local encrypted_file
     if encrypted_file=$(encrypt_staging "$staging_dir"); then
@@ -195,10 +351,31 @@ case "${1:-curl}" in
     "guard")
         hedgii_log "INFO" "Hedgii is guarding your data 24/7! 🛡️"
         ;;
+    "test-commands")
+        hedgii_log "KAWAII" "🦔 Testing custom commands without full backup..."
+        check_dependencies
+        local staging_dir=$(cleanup_staging)
+        execute_custom_commands "$staging_dir"
+        hedgii_log "INFO" "Check results in: $staging_dir"
+        ;;
+    "validate-config")
+        hedgii_log "INFO" "🔍 Validating configuration..."
+        if jq empty "$CONFIG_FILE" 2>/dev/null; then
+            hedgii_log "INFO" "✓ Configuration JSON is valid"
+            local custom_count=$(jq '.custom_commands | length' "$CONFIG_FILE")
+            local source_count=$(jq '.backup_sources | length' "$CONFIG_FILE")
+            hedgii_log "INFO" "📊 Found $custom_count custom commands, $source_count file sources"
+        else
+            hedgii_log "ERROR" "✗ Configuration JSON is invalid"
+            exit 1
+        fi
+        ;;
     *)
         echo "🦔 Hedgii Commands:"
-        echo "  curl  - Backup your data (default)"
-        echo "  peek  - Check backup status"
-        echo "  guard - View protection status"
+        echo "  curl           - Backup your data with custom commands (default)"
+        echo "  peek           - Check backup status"
+        echo "  guard          - View protection status"
+        echo "  test-commands  - Test custom commands without full backup"
+        echo "  validate-config - Validate configuration file"
         ;;
 esac
