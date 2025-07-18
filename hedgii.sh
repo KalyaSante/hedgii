@@ -320,6 +320,175 @@ upload_to_cloud() {
     fi
 }
 
+# Edit configuration with nano
+hedgii_edit_config() {
+    hedgii_log "KAWAII" "🦔 Opening configuration for editing! ✨"
+    
+    # Check if config file exists
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        hedgii_log "ERROR" "Configuration file not found: $CONFIG_FILE"
+        hedgii_log "INFO" "Run the installer or create the config file first"
+        exit 1
+    fi
+    
+    # Backup current config
+    local backup_file="$CONFIG_FILE.backup.$(date +%Y%m%d_%H%M%S)"
+    cp "$CONFIG_FILE" "$backup_file"
+    hedgii_log "INFO" "Config backed up to: $backup_file"
+    
+    # Open nano
+    hedgii_log "INFO" "Opening nano editor..."
+    echo ""
+    echo "💡 Tips for editing:"
+    echo "   - Use Ctrl+X to save and exit"
+    echo "   - Use Ctrl+G for help"
+    echo "   - Configuration will be validated after editing"
+    echo ""
+    read -p "Press Enter to continue..."
+    
+    # Launch nano
+    if nano "$CONFIG_FILE"; then
+        hedgii_log "INFO" "Editor closed, validating configuration..."
+        
+        # Validate JSON after editing
+        if jq empty "$CONFIG_FILE" 2>/dev/null; then
+            hedgii_log "INFO" "✓ Configuration is valid!"
+            hedgii_log "KAWAII" "🎉 Configuration updated successfully! (≧◡≦)"
+        else
+            hedgii_log "ERROR" "✗ Configuration JSON is invalid!"
+            echo ""
+            read -p "Do you want to fix it now? (y/n): " fix_choice
+            if [[ "$fix_choice" =~ ^[Yy] ]]; then
+                hedgii_edit_config  # Recursive call to re-edit
+            else
+                hedgii_log "WARN" "Restoring backup..."
+                cp "$backup_file" "$CONFIG_FILE"
+                hedgii_log "INFO" "Original configuration restored"
+            fi
+        fi
+    else
+        hedgii_log "WARN" "Editor was cancelled, no changes made"
+    fi
+}
+
+# Change GPG passphrase
+hedgii_change_passphrase() {
+    hedgii_log "KAWAII" "🔐 Changing your GPG passphrase! Let's make it even more secure! ✨"
+    
+    local passphrase_file=$(jq -r '.settings.encrypt_passphrase_file // "/etc/hedgii/gpg_passphrase"' "$CONFIG_FILE")
+    
+    # Check if running as root
+    if [[ $EUID -ne 0 ]]; then
+        hedgii_log "ERROR" "This command must be run as root (use sudo)"
+        exit 1
+    fi
+    
+    # Check if passphrase file exists
+    if [[ ! -f "$passphrase_file" ]]; then
+        hedgii_log "ERROR" "Passphrase file not found: $passphrase_file"
+        hedgii_log "INFO" "Run the installer to set up the initial passphrase"
+        exit 1
+    fi
+    
+    # Backup current passphrase
+    local backup_passphrase_file="$passphrase_file.backup.$(date +%Y%m%d_%H%M%S)"
+    cp "$passphrase_file" "$backup_passphrase_file"
+    chmod 600 "$backup_passphrase_file"
+    hedgii_log "INFO" "Old passphrase backed up to: $backup_passphrase_file"
+    
+    echo ""
+    hedgii_log "WARN" "🚨 IMPORTANT SECURITY NOTICE 🚨"
+    echo "   • Your old backups will still use the OLD passphrase"
+    echo "   • Keep the old passphrase safe until you no longer need old backups"
+    echo "   • Future backups will use the NEW passphrase"
+    echo "   • Test the new passphrase immediately after changing it"
+    echo ""
+    
+    read -p "🤔 Do you want to continue? (y/n): " confirm
+    if [[ ! "$confirm" =~ ^[Yy] ]]; then
+        hedgii_log "INFO" "Passphrase change cancelled"
+        rm -f "$backup_passphrase_file"
+        exit 0
+    fi
+    
+    echo ""
+    local new_passphrase=""
+    local confirm_passphrase=""
+    
+    while [[ -z "$new_passphrase" || "$new_passphrase" != "$confirm_passphrase" ]]; do
+        echo -n "🔑 Enter NEW GPG passphrase: "
+        read -s new_passphrase
+        echo
+        
+        if [[ -z "$new_passphrase" ]]; then
+            hedgii_log "WARN" "Passphrase cannot be empty"
+            continue
+        fi
+        
+        if [[ ${#new_passphrase} -lt 8 ]]; then
+            hedgii_log "WARN" "Passphrase should be at least 8 characters long"
+            continue
+        fi
+        
+        echo -n "🔑 Confirm NEW GPG passphrase: "
+        read -s confirm_passphrase
+        echo
+        
+        if [[ "$new_passphrase" != "$confirm_passphrase" ]]; then
+            hedgii_log "WARN" "Passphrases don't match, try again"
+        fi
+    done
+    
+    # Update passphrase file
+    echo "$new_passphrase" > "$passphrase_file"
+    chmod 600 "$passphrase_file"
+    
+    hedgii_log "INFO" "✓ New passphrase saved securely"
+    
+    # Test the new passphrase with a quick encryption/decryption
+    hedgii_log "INFO" "🧪 Testing new passphrase..."
+    local test_file="/tmp/hedgii_test_$$.txt"
+    local test_encrypted="/tmp/hedgii_test_$$.gpg"
+    
+    echo "Hedgii test data $(date)" > "$test_file"
+    
+    if gpg --symmetric --cipher-algo AES256 --batch --yes \
+        --passphrase-file "$passphrase_file" \
+        --output "$test_encrypted" "$test_file" 2>/dev/null; then
+        
+        if gpg --decrypt --batch --yes \
+            --passphrase-file "$passphrase_file" \
+            "$test_encrypted" >/dev/null 2>&1; then
+            
+            hedgii_log "INFO" "✅ New passphrase test successful!"
+            hedgii_log "KAWAII" "🎉 Passphrase changed successfully! Your backups are now even more secure! (≧◡≦)"
+        else
+            hedgii_log "ERROR" "❌ Decryption test failed!"
+            hedgii_log "WARN" "Restoring old passphrase..."
+            cp "$backup_passphrase_file" "$passphrase_file"
+            chmod 600 "$passphrase_file"
+            hedgii_log "INFO" "Old passphrase restored"
+        fi
+    else
+        hedgii_log "ERROR" "❌ Encryption test failed!"
+        hedgii_log "WARN" "Restoring old passphrase..."
+        cp "$backup_passphrase_file" "$passphrase_file"
+        chmod 600 "$passphrase_file"
+        hedgii_log "INFO" "Old passphrase restored"
+    fi
+    
+    # Cleanup test files
+    rm -f "$test_file" "$test_encrypted"
+    
+    echo ""
+    hedgii_log "INFO" "📋 Next steps:"
+    echo "   1. Test a backup: hedgii curl"
+    echo "   2. Verify you can decrypt: hedgii test-commands"
+    echo "   3. Keep the old passphrase backup safe: $backup_passphrase_file"
+    echo ""
+    hedgii_log "KAWAII" "Remember: A secure hedgehog is a happy hedgehog! 🦔🔐"
+}
+
 # Main backup function
 hedgii_curl() {
     hedgii_log "KAWAII" "🦔 Hedgii is ready to protect your data with custom powers! ✨"
@@ -382,12 +551,20 @@ case "${1:-curl}" in
             exit 1
         fi
         ;;
+    "edit-config")
+        hedgii_edit_config
+        ;;
+    "change-passphrase")
+        hedgii_change_passphrase
+        ;;
     *)
         echo "🦔 Hedgii Commands:"
-        echo "  curl           - Backup your data with custom commands (default)"
-        echo "  peek           - Check backup status"
-        echo "  guard          - View protection status"
-        echo "  test-commands  - Test custom commands without full backup"
-        echo "  validate-config - Validate configuration file"
+        echo "  curl             - Backup your data with custom commands (default)"
+        echo "  peek             - Check backup status"
+        echo "  guard            - View protection status"
+        echo "  test-commands    - Test custom commands without full backup"
+        echo "  validate-config  - Validate configuration file"
+        echo "  edit-config      - Edit configuration with nano"
+        echo "  change-passphrase - Change GPG encryption passphrase"
         ;;
 esac
