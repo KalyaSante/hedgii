@@ -85,7 +85,19 @@ copy_resource() {
     mkdir -p "$dest_dir"
     
     if [[ -d "$source" ]]; then
-        rsync -av --exclude="*.tmp" --exclude=".git" "$source/" "$dest_full/"
+        # Build rsync exclusions from config
+        local rsync_opts="-av --progress"
+        local exclusions=$(jq -r '.exclusions[]?' "$CONFIG_FILE" 2>/dev/null)
+        if [[ -n "$exclusions" ]]; then
+            while IFS= read -r exclusion; do
+                if [[ -n "$exclusion" ]]; then
+                    rsync_opts="$rsync_opts --exclude=$exclusion"
+                fi
+            done <<< "$exclusions"
+        fi
+        
+        # Execute rsync with exclusions
+        rsync $rsync_opts "$source/" "$dest_full/"
     else
         cp "$source" "$dest_full"
     fi
