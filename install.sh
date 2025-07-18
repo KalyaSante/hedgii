@@ -88,6 +88,59 @@ check_system() {
     fi
 }
 
+# Fix Debian repositories if needed
+fix_debian_repos() {
+    if [[ -f /etc/debian_version ]]; then
+        local debian_version=$(cat /etc/debian_version)
+        hedgii_install_log "INFO" "Debian version: $debian_version"
+        
+        # Check if we're on an obsolete Debian version
+        if [[ "$debian_version" == "10."* ]] || grep -q "buster" /etc/os-release 2>/dev/null; then
+            hedgii_install_log "WARN" "Detected Debian 10 (buster) - updating repository sources..."
+            
+            # Backup original sources.list
+            if [[ ! -f /etc/apt/sources.list.backup ]]; then
+                cp /etc/apt/sources.list /etc/apt/sources.list.backup
+            fi
+            
+            # Update to archive repositories
+            cat > /etc/apt/sources.list << 'EOF'
+# Debian 10 (buster) - Archive repositories
+deb http://archive.debian.org/debian buster main contrib non-free
+deb http://archive.debian.org/debian-security buster/updates main contrib non-free
+EOF
+            hedgii_install_log "INFO" "Updated repositories to use archive.debian.org"
+        fi
+    fi
+}
+
+# Install packages individually for problematic apt systems
+install_packages_individually_apt() {
+    local packages=("jq" "gpg" "rsync" "curl" "cron" "logrotate")
+    local failed_packages=()
+    
+    hedgii_install_log "INFO" "Installing packages individually..."
+    
+    for package in "${packages[@]}"; do
+        if command -v "$package" >/dev/null 2>&1; then
+            hedgii_install_log "INFO" "✓ $package already installed"
+        else
+            hedgii_install_log "INFO" "Installing $package..."
+            if apt-get install -y "$package" 2>/dev/null; then
+                hedgii_install_log "INFO" "✓ $package installed successfully"
+            else
+                hedgii_install_log "WARN" "✗ Failed to install $package"
+                failed_packages+=("$package")
+            fi
+        fi
+    done
+    
+    if [[ ${#failed_packages[@]} -gt 0 ]]; then
+        hedgii_install_log "WARN" "Failed to install: ${failed_packages[*]}"
+        hedgii_install_log "INFO" "You may need to install these packages manually"
+    fi
+}
+
 # Install dependencies
 install_dependencies() {
     hedgii_install_log "KAWAII" "Installing dependencies for Hedgii..."
@@ -112,8 +165,23 @@ install_dependencies() {
     # Install based on package manager
     case "$package_manager" in
         "apt")
-            apt-get update
-            apt-get install -y jq gpg rsync curl cron logrotate
+            # Fix repositories if needed
+            fix_debian_repos
+            
+            # Try to update, but continue even if it fails
+            hedgii_install_log "INFO" "Updating package lists..."
+            if ! apt-get update; then
+                hedgii_install_log "WARN" "Package update failed, trying alternative approach..."
+                
+                # Try to install packages individually
+                install_packages_individually_apt
+            else
+                # Normal installation
+                if ! apt-get install -y jq gpg rsync curl cron logrotate; then
+                    hedgii_install_log "WARN" "Bulk installation failed, trying individual packages..."
+                    install_packages_individually_apt
+                fi
+            fi
             ;;
         "yum"|"dnf")
             $package_manager install -y jq gnupg2 rsync curl crontabs logrotate
@@ -126,7 +194,9 @@ install_dependencies() {
     # Install rclone
     if ! command -v rclone >/dev/null 2>&1; then
         hedgii_install_log "INFO" "Installing rclone..."
-        curl -fsSL https://rclone.org/install.sh | bash
+        if ! curl -fsSL https://rclone.org/install.sh | bash; then
+            hedgii_install_log "WARN" "rclone auto-install failed, you may need to install it manually"
+        fi
     else
         hedgii_install_log "INFO" "rclone already installed"
     fi
@@ -153,7 +223,7 @@ create_directories() {
 
 # Install the main script
 install_hedgii_script() {
-    hedgii_install_log "INFO" "Installing Hedgii script..."
+    hedgii_install_log "INFO" "Installing Hedgii scripts..."
     
     # Copy the main script
     if [[ -f "hedgii.sh" ]]; then
@@ -165,10 +235,24 @@ install_hedgii_script() {
         exit 1
     fi
     
-    # Create symlink for easy access
+    # Copy the doctor script
+    if [[ -f "scripts/hedgii-doctor.sh" ]]; then
+        cp "scripts/hedgii-doctor.sh" "$INSTALL_DIR/hedgii-doctor"
+        chmod +x "$INSTALL_DIR/hedgii-doctor"
+        hedgii_install_log "INFO" "Hedgii Doctor installed to $INSTALL_DIR/hedgii-doctor"
+    else
+        hedgii_install_log "WARN" "Doctor script not found, skipping..."
+    fi
+    
+    # Create symlinks for easy access
     if [[ ! -L "/usr/bin/hedgii" ]]; then
         ln -s "$INSTALL_DIR/$SCRIPT_NAME" "/usr/bin/hedgii"
         hedgii_install_log "INFO" "Created symlink: /usr/bin/hedgii"
+    fi
+    
+    if [[ -f "$INSTALL_DIR/hedgii-doctor" && ! -L "/usr/bin/hedgii-doctor" ]]; then
+        ln -s "$INSTALL_DIR/hedgii-doctor" "/usr/bin/hedgii-doctor"
+        hedgii_install_log "INFO" "Created symlink: /usr/bin/hedgii-doctor"
     fi
 }
 
@@ -184,8 +268,47 @@ setup_configuration() {
             cp "config/hedgii_config.json.example" "$config_file"
             hedgii_install_log "INFO" "Created configuration file: $config_file"
         else
-            hedgii_install_log "ERROR" "Configuration example not found"
-            exit 1
+            # Create a basic config if no example exists
+            cat > "$config_file" << 'EOF'
+{
+  "backup_sources": [
+    {
+      "source": "/var/www",
+      "destination": "web",
+      "description": "🌐 Website files"
+    },
+    {
+      "source": "/etc/nginx",
+      "destination": "config/nginx",
+      "description": "⚙️ Nginx configuration"
+    }
+  ],
+  "custom_commands": [
+    {
+      "command": "mysqldump --all-databases --single-transaction --routines --triggers",
+      "description": "📊 Complete MySQL database dump",
+      "output_file": "databases/mysql_full_dump.sql",
+      "timeout": 600,
+      "working_dir": "/tmp",
+      "continue_on_error": false
+    }
+  ],
+  "settings": {
+    "staging_dir": "/tmp/hedgii_staging",
+    "backup_dir": "/var/backups/hedgii",
+    "encrypt_passphrase_file": "/etc/hedgii/gpg_passphrase",
+    "rclone_remote": "onedrive:hedgii-backups/"
+  },
+  "exclusions": [
+    "*.tmp",
+    "*.log.old",
+    "node_modules",
+    ".git",
+    "*.cache"
+  ]
+}
+EOF
+            hedgii_install_log "INFO" "Created basic configuration file"
         fi
     fi
     
@@ -282,6 +405,32 @@ EOF
     fi
 }
 
+# Setup log rotation
+setup_log_rotation() {
+    hedgii_install_log "INFO" "Setting up log rotation..."
+    
+    local logrotate_file="/etc/logrotate.d/hedgii"
+    cat > "$logrotate_file" << EOF
+# 🦔 Hedgii Log Rotation Configuration
+$LOG_DIR/*.log {
+    daily
+    rotate 30
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 644 root root
+    postrotate
+        # Send a kawaii signal that logs were rotated
+        echo "🦔 Hedgii logs rotated on \$(date)" >> $LOG_DIR/hedgii_maintenance.log
+    endscript
+}
+EOF
+    
+    chmod 644 "$logrotate_file"
+    hedgii_install_log "INFO" "Log rotation configured (30 days retention)"
+}
+
 # Setup bash aliases
 setup_aliases() {
     hedgii_install_log "INFO" "Setting up convenient aliases..."
@@ -294,6 +443,7 @@ alias hedgii-status='$INSTALL_DIR/$SCRIPT_NAME peek'
 alias hedgii-config='nano $CONFIG_DIR/hedgii_config.json'
 alias hedgii-logs='tail -f $LOG_DIR/hedgii_*.log'
 alias hedgii-test='$INSTALL_DIR/$SCRIPT_NAME test-commands'
+alias hedgii-doctor='$INSTALL_DIR/hedgii-doctor'
 "
     
     if ! grep -q "Hedgii Kawaii Aliases" "$alias_file" 2>/dev/null; then
@@ -307,18 +457,62 @@ test_installation() {
     hedgii_install_log "INFO" "Testing Hedgii installation..."
     
     # Test script execution
-    if "$INSTALL_DIR/$SCRIPT_NAME" validate-config >/dev/null 2>&1; then
-        hedgii_install_log "INFO" "✓ Configuration validation passed"
+    if [[ -f "$INSTALL_DIR/$SCRIPT_NAME" ]] && [[ -x "$INSTALL_DIR/$SCRIPT_NAME" ]]; then
+        hedgii_install_log "INFO" "✓ Hedgii script installed and executable"
+        
+        # Try to validate config
+        if "$INSTALL_DIR/$SCRIPT_NAME" validate-config >/dev/null 2>&1; then
+            hedgii_install_log "INFO" "✓ Configuration validation passed"
+        else
+            hedgii_install_log "WARN" "⚠ Configuration validation failed (you may need to configure rclone)"
+        fi
     else
-        hedgii_install_log "WARN" "⚠ Configuration validation failed (you may need to configure rclone)"
+        hedgii_install_log "ERROR" "✗ Hedgii script not properly installed"
     fi
     
     # Test cron job
-    if [[ -f "/etc/cron.d/hedgii-backup" ]]; then
+    if crontab -l 2>/dev/null | grep -q hedgii || [[ -f "/etc/cron.d/hedgii-backup" ]]; then
         hedgii_install_log "INFO" "✓ Cron job configured"
     else
         hedgii_install_log "WARN" "⚠ Cron job not found"
     fi
+    
+    # Test dependencies with fallback checks
+    local deps=("jq" "gpg" "rsync" "rclone")
+    local missing_deps=()
+    
+    for dep in "${deps[@]}"; do
+        if command -v "$dep" >/dev/null 2>&1; then
+            hedgii_install_log "INFO" "✓ $dep installed"
+        else
+            hedgii_install_log "WARN" "⚠ $dep not found"
+            missing_deps+=("$dep")
+        fi
+    done
+    
+    # Special check for essential packages
+    if [[ ${#missing_deps[@]} -gt 0 ]]; then
+        hedgii_install_log "WARN" "Missing dependencies: ${missing_deps[*]}"
+        hedgii_install_log "INFO" "You may need to install these manually:"
+        for dep in "${missing_deps[@]}"; do
+            case "$dep" in
+                "jq") hedgii_install_log "INFO" "  - jq: sudo apt-get install jq (or download from https://github.com/stedolan/jq/releases)" ;;
+                "gpg") hedgii_install_log "INFO" "  - gpg: sudo apt-get install gpg gnupg" ;;
+                "rsync") hedgii_install_log "INFO" "  - rsync: sudo apt-get install rsync" ;;
+                "rclone") hedgii_install_log "INFO" "  - rclone: curl https://rclone.org/install.sh | sudo bash" ;;
+            esac
+        done
+    fi
+    
+    # Test directories
+    local dirs=("$CONFIG_DIR" "$LOG_DIR" "$BACKUP_DIR")
+    for dir in "${dirs[@]}"; do
+        if [[ -d "$dir" ]]; then
+            hedgii_install_log "INFO" "✓ Directory exists: $dir"
+        else
+            hedgii_install_log "WARN" "⚠ Directory missing: $dir"
+        fi
+    done
 }
 
 # Show completion message
@@ -351,6 +545,7 @@ EOF
     echo "   hedgii-config    - Edit configuration"
     echo "   hedgii-logs      - View logs in real-time"
     echo "   hedgii-test      - Test custom commands"
+    echo "   hedgii-doctor    - Diagnose problems"
     echo ""
     echo "🕐 Automatic Backups:"
     echo "   Daily at ${cron_hour}:${cron_minute} (configured in /etc/cron.d/hedgii-backup)"
@@ -374,6 +569,7 @@ main() {
     setup_configuration
     setup_gpg_passphrase
     setup_cron_job
+    setup_log_rotation
     setup_aliases
     test_installation
     show_completion
