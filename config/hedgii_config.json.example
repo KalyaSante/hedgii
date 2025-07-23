@@ -117,13 +117,22 @@
     "staging_dir": "/tmp/hedgii_staging",
     "backup_dir": "/var/backups/hedgii",
     "encrypt_passphrase_file": "/etc/hedgii/gpg_passphrase",
-    "rclone_remote": "onedrive:hedgii-backups/"
+
+    "sync_method": "auto",
+    "cloud_provider": "onedrive",
+
+    "rclone_remote": "onedrive:hedgii-backups/",
+
+    "onedrive_backup_dir": "hedgii-backups",
+    "onedrive_config_dir": "/etc/hedgii/onedrive"
   },
   "exclusions": [
     "*.tmp",
     "*.log.old",
     "node_modules",
     ".git",
-    "*.cache"
+    "*.cache",
+    ".DS_Store",
+    "Thumbs.db"
   ]
 }
