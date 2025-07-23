@@ -1,7 +1,9 @@
 #!/bin/bash
 
 # 🦔 Hedgii - Your Kawaii Backup Guardian
-# The adorable yet secure backup solution
+# The adorable yet secure backup solution with multi-sync support
+
+set -euo pipefail
 
 # Configuration
 CONFIG_FILE="/etc/hedgii/hedgii_config.json"
@@ -16,6 +18,7 @@ PINK='\033[1;35m'
 GREEN='\033[1;32m'
 YELLOW='\033[1;33m'
 RED='\033[1;31m'
+BLUE='\033[1;34m'
 NC='\033[0m'
 
 # Kawaii logging function
@@ -23,7 +26,7 @@ hedgii_log() {
     local level="$1"
     shift
     local message="$*"
-    
+
     case "$level" in
         "INFO")  echo -e "${GREEN}🦔 [INFO]${NC} $message" | tee -a "$LOG_FILE" ;;
         "WARN")  echo -e "${YELLOW}⚠️  [WARN]${NC} $message" | tee -a "$LOG_FILE" ;;
@@ -34,15 +37,15 @@ hedgii_log() {
 
 # Check dependencies
 check_dependencies() {
-    local deps=("jq" "gpg" "rclone" "rsync")
-    
+    local deps=("jq" "gpg" "rsync")
+
     for dep in "${deps[@]}"; do
         if ! command -v "$dep" >/dev/null 2>&1; then
             hedgii_log "ERROR" "Missing dependency: $dep"
             exit 1
         fi
     done
-    
+
     if [[ ! -f "$CONFIG_FILE" ]]; then
         hedgii_log "ERROR" "Config file not found: $CONFIG_FILE"
         hedgii_log "INFO" "Copy config/hedgii_config.json.example to $CONFIG_FILE"
@@ -50,16 +53,304 @@ check_dependencies() {
     fi
 }
 
+# Detect available sync clients
+detect_sync_clients() {
+    local clients=()
+
+    if command -v rclone >/dev/null 2>&1; then
+        clients+=("rclone")
+    fi
+
+    if command -v onedrive >/dev/null 2>&1; then
+        clients+=("onedrive")
+    fi
+
+    echo "${clients[@]}"
+}
+
+# Get sync method from config
+get_sync_method() {
+    local sync_method=$(jq -r '.settings.sync_method // "auto"' "$CONFIG_FILE")
+
+    if [[ "$sync_method" == "auto" ]]; then
+        # Auto-detect best available client
+        local available_clients=($(detect_sync_clients))
+
+        if [[ ${#available_clients[@]} -eq 0 ]]; then
+            hedgii_log "ERROR" "No sync clients found (rclone or onedrive)"
+            return 1
+        fi
+
+        # Prefer onedrive for OneDrive, rclone for others
+        local cloud_provider=$(jq -r '.settings.cloud_provider // "onedrive"' "$CONFIG_FILE")
+
+        if [[ "$cloud_provider" == "onedrive" ]] && [[ " ${available_clients[*]} " =~ " onedrive " ]]; then
+            echo "onedrive"
+        elif [[ " ${available_clients[*]} " =~ " rclone " ]]; then
+            echo "rclone"
+        else
+            echo "${available_clients[0]}"
+        fi
+    else
+        echo "$sync_method"
+    fi
+}
+
+# Setup OneDrive client (abraunegg)
+setup_onedrive_client() {
+    hedgii_log "KAWAII" "🔄 Setting up OneDrive client (abraunegg)..."
+
+    local onedrive_config_dir="/etc/hedgii/onedrive"
+    mkdir -p "$onedrive_config_dir"
+
+    # Check if already configured
+    if [[ -f "$onedrive_config_dir/config" ]]; then
+        hedgii_log "INFO" "OneDrive client already configured"
+        return 0
+    fi
+
+    hedgii_log "INFO" "Creating OneDrive configuration..."
+
+    # Get backup directory from config
+    local backup_subdir=$(jq -r '.settings.onedrive_backup_dir // "hedgii-backups"' "$CONFIG_FILE")
+
+    cat > "$onedrive_config_dir/config" << EOF
+# 🦔 Hedgii OneDrive Configuration
+sync_dir = "$onedrive_config_dir/sync"
+skip_file = "$onedrive_config_dir/skip_file"
+log_dir = "/var/log/hedgii/"
+drive_id = ""
+upload_only = true
+check_nomount = false
+check_nosync = false
+local_first = false
+download_only = false
+disable_notifications = true
+disable_upload_validation = false
+enable_logging = true
+force_http_11 = false
+sync_root_files = false
+skip_symlinks = true
+debug_https = false
+skip_dotfiles = true
+dry_run = false
+monitor_interval = 300
+min_notify_changes = 5
+monitor_log_frequency = 10
+monitor_fullscan_frequency = 10
+sync_business_shared_folders = false
+webhook_enabled = false
+webhook_public_key_file = ""
+webhook_listening_host = ""
+webhook_listening_port = 8888
+azure_ad_endpoint = ""
+azure_tenant_id = ""
+single_directory = "$backup_subdir"
+EOF
+
+    # Create sync directory
+    mkdir -p "$onedrive_config_dir/sync"
+
+    # Create skip file for exclusions
+    cat > "$onedrive_config_dir/skip_file" << 'EOF'
+# Skip temporary files
+*.tmp
+*.temp
+.DS_Store
+Thumbs.db
+~*
+.~*
+EOF
+
+    chmod 600 "$onedrive_config_dir/config"
+    hedgii_log "INFO" "OneDrive configuration created at $onedrive_config_dir"
+
+    hedgii_log "WARN" "⚠️  Manual step required:"
+    echo "   Run: sudo onedrive --confdir='$onedrive_config_dir' --auth-files"
+    echo "   Then: sudo onedrive --confdir='$onedrive_config_dir' --sync --single-directory='$backup_subdir' --upload-only --dry-run"
+}
+
+# Upload using OneDrive client
+upload_with_onedrive() {
+    local encrypted_file="$1"
+    local onedrive_config_dir="/etc/hedgii/onedrive"
+    local sync_dir="$onedrive_config_dir/sync"
+
+    hedgii_log "INFO" "📤 Uploading with OneDrive client..."
+
+    # Check if OneDrive is configured
+    if [[ ! -f "$onedrive_config_dir/config" ]]; then
+        hedgii_log "ERROR" "OneDrive client not configured"
+        return 1
+    fi
+
+    # Copy file to sync directory
+    local filename=$(basename "$encrypted_file")
+    local sync_file="$sync_dir/$filename"
+
+    if cp "$encrypted_file" "$sync_file"; then
+        hedgii_log "INFO" "File copied to sync directory: $sync_file"
+    else
+        hedgii_log "ERROR" "Failed to copy file to sync directory"
+        return 1
+    fi
+
+    # Perform sync with retry
+    local max_attempts=3
+    for attempt in $(seq 1 $max_attempts); do
+        hedgii_log "INFO" "Sync attempt $attempt/$max_attempts..."
+
+        if timeout 300 onedrive --confdir="$onedrive_config_dir" \
+            --sync --single-directory="$(jq -r '.settings.onedrive_backup_dir // "hedgii-backups"' "$CONFIG_FILE")" \
+            --upload-only --no-remote-delete; then
+
+            hedgii_log "INFO" "✅ OneDrive sync completed successfully"
+
+            # Clean up local sync file
+            rm -f "$sync_file"
+            return 0
+        else
+            hedgii_log "WARN" "Sync attempt $attempt failed"
+
+            if [[ $attempt -lt $max_attempts ]]; then
+                hedgii_log "INFO" "Retrying in 30 seconds..."
+                sleep 30
+            fi
+        fi
+    done
+
+    hedgii_log "ERROR" "OneDrive sync failed after $max_attempts attempts"
+    return 1
+}
+
+# Upload using rclone
+upload_with_rclone() {
+    local encrypted_file="$1"
+    local rclone_remote=$(jq -r '.settings.rclone_remote // "onedrive:hedgii-backups/"' "$CONFIG_FILE")
+
+    hedgii_log "INFO" "📤 Uploading with rclone..."
+
+    # Check if rclone remote is configured
+    if ! rclone listremotes | grep -q "$(echo "$rclone_remote" | cut -d: -f1)"; then
+        hedgii_log "ERROR" "rclone remote not configured: $rclone_remote"
+        return 1
+    fi
+
+    # Upload with retry
+    local max_attempts=3
+    for attempt in $(seq 1 $max_attempts); do
+        hedgii_log "INFO" "Upload attempt $attempt/$max_attempts..."
+
+        if rclone copy "$encrypted_file" "$rclone_remote" --progress --transfers=1; then
+            hedgii_log "INFO" "✅ rclone upload completed successfully"
+
+            # Verify upload
+            local filename=$(basename "$encrypted_file")
+            if rclone ls "$rclone_remote$filename" >/dev/null 2>&1; then
+                hedgii_log "INFO" "Upload verified on remote"
+                return 0
+            else
+                hedgii_log "WARN" "Upload verification failed"
+            fi
+        else
+            hedgii_log "WARN" "Upload attempt $attempt failed"
+        fi
+
+        if [[ $attempt -lt $max_attempts ]]; then
+            hedgii_log "INFO" "Retrying in 30 seconds..."
+            sleep 30
+        fi
+    done
+
+    hedgii_log "ERROR" "rclone upload failed after $max_attempts attempts"
+    return 1
+}
+
+# Smart upload function that chooses the best method
+smart_upload_to_cloud() {
+    local encrypted_file="$1"
+    local sync_method=$(get_sync_method)
+
+    hedgii_log "KAWAII" "🌥️ Using sync method: $sync_method"
+
+    case "$sync_method" in
+        "onedrive")
+            if command -v onedrive >/dev/null 2>&1; then
+                upload_with_onedrive "$encrypted_file"
+            else
+                hedgii_log "ERROR" "OneDrive client not installed"
+                return 1
+            fi
+            ;;
+        "rclone")
+            if command -v rclone >/dev/null 2>&1; then
+                upload_with_rclone "$encrypted_file"
+            else
+                hedgii_log "ERROR" "rclone not installed"
+                return 1
+            fi
+            ;;
+        *)
+            hedgii_log "ERROR" "Unknown sync method: $sync_method"
+            return 1
+            ;;
+    esac
+}
+
+# Test sync clients
+test_sync_clients() {
+    hedgii_log "KAWAII" "🧪 Testing sync clients..."
+
+    local available_clients=($(detect_sync_clients))
+
+    if [[ ${#available_clients[@]} -eq 0 ]]; then
+        hedgii_log "ERROR" "No sync clients available"
+        return 1
+    fi
+
+    hedgii_log "INFO" "Available sync clients: ${available_clients[*]}"
+
+    # Test each available client
+    for client in "${available_clients[@]}"; do
+        case "$client" in
+            "rclone")
+                hedgii_log "INFO" "Testing rclone..."
+                if rclone version >/dev/null 2>&1; then
+                    local remotes=$(rclone listremotes 2>/dev/null | wc -l)
+                    hedgii_log "INFO" "✅ rclone working ($remotes remotes configured)"
+                else
+                    hedgii_log "WARN" "⚠️ rclone has issues"
+                fi
+                ;;
+            "onedrive")
+                hedgii_log "INFO" "Testing OneDrive client..."
+                if onedrive --version >/dev/null 2>&1; then
+                    hedgii_log "INFO" "✅ OneDrive client working"
+
+                    local config_dir="/etc/hedgii/onedrive"
+                    if [[ -f "$config_dir/config" ]]; then
+                        hedgii_log "INFO" "✅ OneDrive configured"
+                    else
+                        hedgii_log "WARN" "⚠️ OneDrive not configured"
+                    fi
+                else
+                    hedgii_log "WARN" "⚠️ OneDrive client has issues"
+                fi
+                ;;
+        esac
+    done
+}
+
 # Cleanup staging directory
 cleanup_staging() {
     local staging_dir=$(jq -r '.settings.staging_dir // "/tmp/hedgii_staging"' "$CONFIG_FILE")
-    
+
     hedgii_log "INFO" "Cleaning staging directory..."
-    
+
     if [[ -d "$staging_dir" ]]; then
         rm -rf "$staging_dir"
     fi
-    
+
     mkdir -p "$staging_dir"
     echo "$staging_dir"
 }
@@ -70,38 +361,26 @@ copy_resource() {
     local dest_relative="$2"
     local description="$3"
     local staging_dir="$4"
-    
+
     local dest_full="$staging_dir/$dest_relative"
     local dest_dir=$(dirname "$dest_full")
-    
+
     hedgii_log "INFO" "Processing: $description"
     hedgii_log "INFO" "  Source: $source → $dest_relative"
-    
+
     if [[ ! -e "$source" ]]; then
         hedgii_log "WARN" "Source not found: $source"
         return 1
     fi
-    
+
     mkdir -p "$dest_dir"
-    
+
     if [[ -d "$source" ]]; then
-        # Build rsync exclusions from config
-        local rsync_opts="-av --progress"
-        local exclusions=$(jq -r '.exclusions[]?' "$CONFIG_FILE" 2>/dev/null)
-        if [[ -n "$exclusions" ]]; then
-            while IFS= read -r exclusion; do
-                if [[ -n "$exclusion" ]]; then
-                    rsync_opts="$rsync_opts --exclude=$exclusion"
-                fi
-            done <<< "$exclusions"
-        fi
-        
-        # Execute rsync with exclusions
-        rsync $rsync_opts "$source/" "$dest_full/"
+        rsync -av --exclude="*.tmp" --exclude=".git" "$source/" "$dest_full/"
     else
         cp "$source" "$dest_full"
     fi
-    
+
     if [[ $? -eq 0 ]]; then
         hedgii_log "INFO" "  ✓ Copy successful"
         return 0
@@ -111,69 +390,13 @@ copy_resource() {
     fi
 }
 
-# Execute custom commands before backup
-execute_custom_commands() {
-    local staging_dir="$1"
-    local custom_commands=$(jq -r '.custom_commands // []' "$CONFIG_FILE")
-    
-    if [[ "$custom_commands" == "[]" ]]; then
-        hedgii_log "INFO" "No custom commands configured"
-        return 0
-    fi
-    
-    local commands_count=$(jq '.custom_commands | length' "$CONFIG_FILE")
-    hedgii_log "KAWAII" "🦔 Running $commands_count custom commands to gather special data! ✨"
-    
-    local success_count=0
-    local failed_count=0
-    
-    for i in $(seq 0 $((commands_count - 1))); do
-        local command=$(jq -r ".custom_commands[$i].command" "$CONFIG_FILE")
-        local description=$(jq -r ".custom_commands[$i].description" "$CONFIG_FILE")
-        local output_file=$(jq -r ".custom_commands[$i].output_file" "$CONFIG_FILE")
-        local timeout=$(jq -r ".custom_commands[$i].timeout // 300" "$CONFIG_FILE")
-        local working_dir=$(jq -r ".custom_commands[$i].working_dir // \"/tmp\"" "$CONFIG_FILE")
-        local continue_on_error=$(jq -r ".custom_commands[$i].continue_on_error // true" "$CONFIG_FILE")
-        
-        hedgii_log "INFO" "🔧 Executing: $description"
-        hedgii_log "INFO" "  Command: $command"
-        hedgii_log "INFO" "  Output: $output_file"
-        
-        # Create output directory in staging
-        local output_path="$staging_dir/$(dirname "$output_file")"
-        mkdir -p "$output_path"
-        
-        # Full output file path
-        local full_output_path="$staging_dir/$output_file"
-        
-        # Execute command with timeout
-        if execute_command_with_timeout "$command" "$working_dir" "$timeout" "$full_output_path"; then
-            hedgii_log "INFO" "  ✓ Command successful"
-            ((success_count++))
-        else
-            hedgii_log "ERROR" "  ✗ Command failed"
-            ((failed_count++))
-            
-            if [[ "$continue_on_error" == "false" ]]; then
-                hedgii_log "ERROR" "Stopping execution due to failed command"
-                return 1
-            fi
-        fi
-        
-        echo "" # Spacing for readability
-    done
-    
-    hedgii_log "INFO" "Custom commands completed: $success_count success, $failed_count failed"
-    return 0
-}
-
-# Execute a command with timeout and proper error handling
+# Execute command with timeout and proper error handling
 execute_command_with_timeout() {
     local command="$1"
     local working_dir="$2"
     local timeout="$3"
     local output_file="$4"
-    
+
     # Create a temporary script for the command
     local temp_script=$(mktemp)
     cat > "$temp_script" << EOF
@@ -182,12 +405,12 @@ cd "$working_dir"
 $command
 EOF
     chmod +x "$temp_script"
-    
+
     # Execute with timeout
     if timeout "$timeout" bash "$temp_script" > "$output_file" 2>&1; then
         local exit_code=$?
         rm -f "$temp_script"
-        
+
         # Check if output file was created and has content
         if [[ -f "$output_file" && -s "$output_file" ]]; then
             local file_size=$(stat -c%s "$output_file")
@@ -200,43 +423,99 @@ EOF
     else
         local exit_code=$?
         rm -f "$temp_script"
-        
+
         if [[ $exit_code -eq 124 ]]; then
             hedgii_log "ERROR" "  Command timed out after ${timeout}s"
         else
             hedgii_log "ERROR" "  Command failed with exit code $exit_code"
         fi
-        
+
         return 1
     fi
+}
+
+# Execute custom commands before backup
+execute_custom_commands() {
+    local staging_dir="$1"
+    local custom_commands=$(jq -r '.custom_commands // []' "$CONFIG_FILE")
+
+    if [[ "$custom_commands" == "[]" ]]; then
+        hedgii_log "INFO" "No custom commands configured"
+        return 0
+    fi
+
+    local commands_count=$(jq '.custom_commands | length' "$CONFIG_FILE")
+    hedgii_log "KAWAII" "🦔 Running $commands_count custom commands to gather special data! ✨"
+
+    local success_count=0
+    local failed_count=0
+
+    for i in $(seq 0 $((commands_count - 1))); do
+        local command=$(jq -r ".custom_commands[$i].command" "$CONFIG_FILE")
+        local description=$(jq -r ".custom_commands[$i].description" "$CONFIG_FILE")
+        local output_file=$(jq -r ".custom_commands[$i].output_file" "$CONFIG_FILE")
+        local timeout=$(jq -r ".custom_commands[$i].timeout // 300" "$CONFIG_FILE")
+        local working_dir=$(jq -r ".custom_commands[$i].working_dir // \"/tmp\"" "$CONFIG_FILE")
+        local continue_on_error=$(jq -r ".custom_commands[$i].continue_on_error // true" "$CONFIG_FILE")
+
+        hedgii_log "INFO" "🔧 Executing: $description"
+        hedgii_log "INFO" "  Command: $command"
+        hedgii_log "INFO" "  Output: $output_file"
+
+        # Create output directory in staging
+        local output_path="$staging_dir/$(dirname "$output_file")"
+        mkdir -p "$output_path"
+
+        # Full output file path
+        local full_output_path="$staging_dir/$output_file"
+
+        # Execute command with timeout
+        if execute_command_with_timeout "$command" "$working_dir" "$timeout" "$full_output_path"; then
+            hedgii_log "INFO" "  ✓ Command successful"
+            ((success_count++))
+        else
+            hedgii_log "ERROR" "  ✗ Command failed"
+            ((failed_count++))
+
+            if [[ "$continue_on_error" == "false" ]]; then
+                hedgii_log "ERROR" "Stopping execution due to failed command"
+                return 1
+            fi
+        fi
+
+        echo "" # Spacing for readability
+    done
+
+    hedgii_log "INFO" "Custom commands completed: $success_count success, $failed_count failed"
+    return 0
 }
 
 # Enhanced process_sources function to include custom commands
 process_sources_with_commands() {
     local staging_dir="$1"
-    
+
     hedgii_log "KAWAII" "🦔 Hedgii is gathering all your precious data! (｡◕‿◕｡)"
-    
+
     # Execute custom commands first
     if ! execute_custom_commands "$staging_dir"; then
         hedgii_log "ERROR" "Custom commands failed, aborting backup"
         return 1
     fi
-    
+
     # Then process regular file sources
     local total_sources=$(jq '.backup_sources | length' "$CONFIG_FILE")
     local success_count=0
-    
+
     for i in $(seq 0 $((total_sources - 1))); do
         local source=$(jq -r ".backup_sources[$i].source" "$CONFIG_FILE")
         local destination=$(jq -r ".backup_sources[$i].destination" "$CONFIG_FILE")
         local description=$(jq -r ".backup_sources[$i].description" "$CONFIG_FILE")
-        
+
         if copy_resource "$source" "$destination" "$description" "$staging_dir"; then
             ((success_count++))
         fi
     done
-    
+
     hedgii_log "INFO" "Data collection complete: $success_count/$total_sources file sources successful"
     return 0
 }
@@ -245,15 +524,15 @@ process_sources_with_commands() {
 generate_backup_report() {
     local staging_dir="$1"
     local report_file="$staging_dir/hedgii_backup_report.txt"
-    
+
     hedgii_log "INFO" "Generating kawaii backup report..."
-    
+
     cat > "$report_file" << EOF
 🦔 ===== HEDGII BACKUP REPORT ===== 🦔
 Generated: $(date)
 Server: $(hostname)
 User: $(whoami)
-Hedgii Version: 1.0-kawaii
+Hedgii Version: 1.0-kawaii-multisync
 
 🎯 BACKUP SUMMARY:
 Total files: $(find "$staging_dir" -type f | wc -l)
@@ -266,6 +545,9 @@ $(find "$staging_dir" -type f -exec ls -lh {} \; | head -20)
 🔧 CUSTOM COMMANDS EXECUTED:
 $(jq -r '.custom_commands[]? | "- " + .description + " → " + .output_file' "$CONFIG_FILE" 2>/dev/null || echo "No custom commands")
 
+🔄 SYNC METHOD:
+$(get_sync_method)
+
 📋 CONFIGURATION USED:
 $(cat "$CONFIG_FILE" | jq '.')
 
@@ -275,26 +557,21 @@ EOF
     hedgii_log "INFO" "Report generated: hedgii_backup_report.txt"
 }
 
-# Process all backup sources (legacy function for compatibility)
-process_sources() {
-    process_sources_with_commands "$1"
-}
-
 # Encrypt the staging directory
 encrypt_staging() {
     local staging_dir="$1"
     local backup_dir=$(jq -r '.settings.backup_dir // "/var/backups/hedgii"' "$CONFIG_FILE")
     local passphrase_file=$(jq -r '.settings.encrypt_passphrase_file' "$CONFIG_FILE")
     local encrypted_file="$backup_dir/hedgii_backup_$DATE.gpg"
-    
+
     mkdir -p "$backup_dir"
-    
+
     hedgii_log "INFO" "Curling up into a protective ball... 🦔"
-    
+
     if tar -czf - -C "$staging_dir" . | gpg --symmetric --cipher-algo AES256 \
         --batch --yes --passphrase-file "$passphrase_file" \
         --output "$encrypted_file"; then
-        
+
         hedgii_log "INFO" "Encryption successful: $encrypted_file"
         echo "$encrypted_file"
         return 0
@@ -304,211 +581,26 @@ encrypt_staging() {
     fi
 }
 
-# Upload to cloud
-upload_to_cloud() {
-    local encrypted_file="$1"
-    local remote_path=$(jq -r '.settings.rclone_remote' "$CONFIG_FILE")
-    
-    hedgii_log "INFO" "Uploading to cloud sanctuary..."
-    
-    if rclone copy "$encrypted_file" "$remote_path"; then
-        hedgii_log "INFO" "Upload successful!"
-        return 0
-    else
-        hedgii_log "ERROR" "Upload failed!"
-        return 1
-    fi
-}
-
-# Edit configuration with nano
-hedgii_edit_config() {
-    hedgii_log "KAWAII" "🦔 Opening configuration for editing! ✨"
-    
-    # Check if config file exists
-    if [[ ! -f "$CONFIG_FILE" ]]; then
-        hedgii_log "ERROR" "Configuration file not found: $CONFIG_FILE"
-        hedgii_log "INFO" "Run the installer or create the config file first"
-        exit 1
-    fi
-    
-    # Backup current config
-    local backup_file="$CONFIG_FILE.backup.$(date +%Y%m%d_%H%M%S)"
-    cp "$CONFIG_FILE" "$backup_file"
-    hedgii_log "INFO" "Config backed up to: $backup_file"
-    
-    # Open nano
-    hedgii_log "INFO" "Opening nano editor..."
-    echo ""
-    echo "💡 Tips for editing:"
-    echo "   - Use Ctrl+X to save and exit"
-    echo "   - Use Ctrl+G for help"
-    echo "   - Configuration will be validated after editing"
-    echo ""
-    read -p "Press Enter to continue..."
-    
-    # Launch nano
-    if nano "$CONFIG_FILE"; then
-        hedgii_log "INFO" "Editor closed, validating configuration..."
-        
-        # Validate JSON after editing
-        if jq empty "$CONFIG_FILE" 2>/dev/null; then
-            hedgii_log "INFO" "✓ Configuration is valid!"
-            hedgii_log "KAWAII" "🎉 Configuration updated successfully! (≧◡≦)"
-        else
-            hedgii_log "ERROR" "✗ Configuration JSON is invalid!"
-            echo ""
-            read -p "Do you want to fix it now? (y/n): " fix_choice
-            if [[ "$fix_choice" =~ ^[Yy] ]]; then
-                hedgii_edit_config  # Recursive call to re-edit
-            else
-                hedgii_log "WARN" "Restoring backup..."
-                cp "$backup_file" "$CONFIG_FILE"
-                hedgii_log "INFO" "Original configuration restored"
-            fi
-        fi
-    else
-        hedgii_log "WARN" "Editor was cancelled, no changes made"
-    fi
-}
-
-# Change GPG passphrase
-hedgii_change_passphrase() {
-    hedgii_log "KAWAII" "🔐 Changing your GPG passphrase! Let's make it even more secure! ✨"
-    
-    local passphrase_file=$(jq -r '.settings.encrypt_passphrase_file // "/etc/hedgii/gpg_passphrase"' "$CONFIG_FILE")
-    
-    # Check if running as root
-    if [[ $EUID -ne 0 ]]; then
-        hedgii_log "ERROR" "This command must be run as root (use sudo)"
-        exit 1
-    fi
-    
-    # Check if passphrase file exists
-    if [[ ! -f "$passphrase_file" ]]; then
-        hedgii_log "ERROR" "Passphrase file not found: $passphrase_file"
-        hedgii_log "INFO" "Run the installer to set up the initial passphrase"
-        exit 1
-    fi
-    
-    # Backup current passphrase
-    local backup_passphrase_file="$passphrase_file.backup.$(date +%Y%m%d_%H%M%S)"
-    cp "$passphrase_file" "$backup_passphrase_file"
-    chmod 600 "$backup_passphrase_file"
-    hedgii_log "INFO" "Old passphrase backed up to: $backup_passphrase_file"
-    
-    echo ""
-    hedgii_log "WARN" "🚨 IMPORTANT SECURITY NOTICE 🚨"
-    echo "   • Your old backups will still use the OLD passphrase"
-    echo "   • Keep the old passphrase safe until you no longer need old backups"
-    echo "   • Future backups will use the NEW passphrase"
-    echo "   • Test the new passphrase immediately after changing it"
-    echo ""
-    
-    read -p "🤔 Do you want to continue? (y/n): " confirm
-    if [[ ! "$confirm" =~ ^[Yy] ]]; then
-        hedgii_log "INFO" "Passphrase change cancelled"
-        rm -f "$backup_passphrase_file"
-        exit 0
-    fi
-    
-    echo ""
-    local new_passphrase=""
-    local confirm_passphrase=""
-    
-    while [[ -z "$new_passphrase" || "$new_passphrase" != "$confirm_passphrase" ]]; do
-        echo -n "🔑 Enter NEW GPG passphrase: "
-        read -s new_passphrase
-        echo
-        
-        if [[ -z "$new_passphrase" ]]; then
-            hedgii_log "WARN" "Passphrase cannot be empty"
-            continue
-        fi
-        
-        if [[ ${#new_passphrase} -lt 8 ]]; then
-            hedgii_log "WARN" "Passphrase should be at least 8 characters long"
-            continue
-        fi
-        
-        echo -n "🔑 Confirm NEW GPG passphrase: "
-        read -s confirm_passphrase
-        echo
-        
-        if [[ "$new_passphrase" != "$confirm_passphrase" ]]; then
-            hedgii_log "WARN" "Passphrases don't match, try again"
-        fi
-    done
-    
-    # Update passphrase file
-    echo "$new_passphrase" > "$passphrase_file"
-    chmod 600 "$passphrase_file"
-    
-    hedgii_log "INFO" "✓ New passphrase saved securely"
-    
-    # Test the new passphrase with a quick encryption/decryption
-    hedgii_log "INFO" "🧪 Testing new passphrase..."
-    local test_file="/tmp/hedgii_test_$$.txt"
-    local test_encrypted="/tmp/hedgii_test_$$.gpg"
-    
-    echo "Hedgii test data $(date)" > "$test_file"
-    
-    if gpg --symmetric --cipher-algo AES256 --batch --yes \
-        --passphrase-file "$passphrase_file" \
-        --output "$test_encrypted" "$test_file" 2>/dev/null; then
-        
-        if gpg --decrypt --batch --yes \
-            --passphrase-file "$passphrase_file" \
-            "$test_encrypted" >/dev/null 2>&1; then
-            
-            hedgii_log "INFO" "✅ New passphrase test successful!"
-            hedgii_log "KAWAII" "🎉 Passphrase changed successfully! Your backups are now even more secure! (≧◡≦)"
-        else
-            hedgii_log "ERROR" "❌ Decryption test failed!"
-            hedgii_log "WARN" "Restoring old passphrase..."
-            cp "$backup_passphrase_file" "$passphrase_file"
-            chmod 600 "$passphrase_file"
-            hedgii_log "INFO" "Old passphrase restored"
-        fi
-    else
-        hedgii_log "ERROR" "❌ Encryption test failed!"
-        hedgii_log "WARN" "Restoring old passphrase..."
-        cp "$backup_passphrase_file" "$passphrase_file"
-        chmod 600 "$passphrase_file"
-        hedgii_log "INFO" "Old passphrase restored"
-    fi
-    
-    # Cleanup test files
-    rm -f "$test_file" "$test_encrypted"
-    
-    echo ""
-    hedgii_log "INFO" "📋 Next steps:"
-    echo "   1. Test a backup: hedgii curl"
-    echo "   2. Verify you can decrypt: hedgii test-commands"
-    echo "   3. Keep the old passphrase backup safe: $backup_passphrase_file"
-    echo ""
-    hedgii_log "KAWAII" "Remember: A secure hedgehog is a happy hedgehog! 🦔🔐"
-}
-
-# Main backup function
+# Main backup function with multi-sync support
 hedgii_curl() {
-    hedgii_log "KAWAII" "🦔 Hedgii is ready to protect your data with custom powers! ✨"
-    
+    hedgii_log "KAWAII" "🦔 Hedgii is ready to protect your data with enhanced sync powers! ✨"
+
     check_dependencies
-    
+
     local staging_dir=$(cleanup_staging)
-    
+
     # Use enhanced processing with custom commands
     if ! process_sources_with_commands "$staging_dir"; then
         hedgii_log "ERROR" "Data collection failed!"
         exit 1
     fi
-    
+
     # Generate comprehensive report
     generate_backup_report "$staging_dir"
-    
+
     local encrypted_file
     if encrypted_file=$(encrypt_staging "$staging_dir"); then
-        if upload_to_cloud "$encrypted_file"; then
+        if smart_upload_to_cloud "$encrypted_file"; then
             hedgii_log "KAWAII" "🎉 Backup completed successfully! Your data is safe! (≧◡≦)"
             rm -rf "$staging_dir"
         else
@@ -520,7 +612,84 @@ hedgii_curl() {
     fi
 }
 
-# Command handling
+# Interactive sync method selection
+select_sync_method() {
+    hedgii_log "KAWAII" "🤔 Which sync method would you like to use?"
+
+    local available_clients=($(detect_sync_clients))
+
+    if [[ ${#available_clients[@]} -eq 0 ]]; then
+        hedgii_log "ERROR" "No sync clients available. Install rclone or onedrive first."
+        return 1
+    fi
+
+    echo ""
+    echo "Available options:"
+    echo "  1) Auto-detect (recommended)"
+
+    local option_number=2
+    for client in "${available_clients[@]}"; do
+        case "$client" in
+            "rclone")   echo "  $option_number) rclone (supports multiple clouds)" ;;
+            "onedrive") echo "  $option_number) OneDrive client (OneDrive optimized)" ;;
+        esac
+        ((option_number++))
+    done
+
+    echo ""
+    read -p "🦔 Choose option (1-$((option_number-1))): " choice
+
+    case "$choice" in
+        1) echo "auto" ;;
+        2) echo "${available_clients[0]}" ;;
+        3) echo "${available_clients[1]}" ;;
+        *) echo "auto" ;;
+    esac
+}
+
+# Enhanced setup wizard
+setup_sync_wizard() {
+    hedgii_log "KAWAII" "🧙 Welcome to the Hedgii Sync Setup Wizard!"
+    echo ""
+
+    # Detect available clients
+    local available_clients=($(detect_sync_clients))
+
+    if [[ ${#available_clients[@]} -eq 0 ]]; then
+        hedgii_log "WARN" "No sync clients detected. Please install rclone or onedrive first."
+        return 1
+    fi
+
+    # Show available clients
+    hedgii_log "INFO" "Available sync clients: ${available_clients[*]}"
+
+    # Let user choose
+    local sync_method=$(select_sync_method)
+    hedgii_log "INFO" "Selected sync method: $sync_method"
+
+    # Update configuration
+    local temp_config=$(mktemp)
+    jq --arg method "$sync_method" '.settings.sync_method = $method' "$CONFIG_FILE" > "$temp_config"
+    mv "$temp_config" "$CONFIG_FILE"
+
+    # Setup chosen method
+    case "$sync_method" in
+        "onedrive"|"auto")
+            if [[ " ${available_clients[*]} " =~ " onedrive " ]]; then
+                setup_onedrive_client
+            fi
+            ;;
+    esac
+
+    # Setup rclone if chosen or available
+    if [[ "$sync_method" == "rclone" ]] || [[ "$sync_method" == "auto" && " ${available_clients[*]} " =~ " rclone " ]]; then
+        hedgii_log "INFO" "Configure rclone with: rclone config"
+    fi
+
+    hedgii_log "KAWAII" "✨ Sync setup completed!"
+}
+
+# Command handling with enhanced multi-sync support
 case "${1:-curl}" in
     "curl")
         hedgii_curl
@@ -534,7 +703,6 @@ case "${1:-curl}" in
         ;;
     "test-commands")
         hedgii_log "KAWAII" "🦔 Testing custom commands without full backup..."
-        check_dependencies
         local staging_dir=$(cleanup_staging)
         execute_custom_commands "$staging_dir"
         hedgii_log "INFO" "Check results in: $staging_dir"
@@ -551,20 +719,54 @@ case "${1:-curl}" in
             exit 1
         fi
         ;;
-    "edit-config")
-        hedgii_edit_config
+    "test-sync")
+        hedgii_log "KAWAII" "🧪 Testing sync clients..."
+        test_sync_clients
         ;;
-    "change-passphrase")
-        hedgii_change_passphrase
+    "setup-sync")
+        hedgii_log "KAWAII" "🔧 Setting up sync configuration..."
+        setup_sync_wizard
+        ;;
+    "setup-onedrive")
+        hedgii_log "KAWAII" "🔄 Setting up OneDrive client..."
+        setup_onedrive_client
+        ;;
+    "sync-status")
+        hedgii_log "INFO" "📊 Sync clients status:"
+        local available_clients=($(detect_sync_clients))
+        local sync_method=$(get_sync_method)
+
+        hedgii_log "INFO" "Available clients: ${available_clients[*]}"
+        hedgii_log "INFO" "Current method: $sync_method"
+
+        for client in "${available_clients[@]}"; do
+            case "$client" in
+                "rclone")
+                    local remotes=$(rclone listremotes 2>/dev/null | wc -l)
+                    hedgii_log "INFO" "rclone: $remotes remotes configured"
+                    ;;
+                "onedrive")
+                    if [[ -f "/etc/hedgii/onedrive/config" ]]; then
+                        hedgii_log "INFO" "OneDrive: configured"
+                    else
+                        hedgii_log "INFO" "OneDrive: not configured"
+                    fi
+                    ;;
+            esac
+        done
         ;;
     *)
         echo "🦔 Hedgii Commands:"
-        echo "  curl             - Backup your data with custom commands (default)"
+        echo "  curl             - Backup your data with enhanced sync (default)"
         echo "  peek             - Check backup status"
         echo "  guard            - View protection status"
         echo "  test-commands    - Test custom commands without full backup"
         echo "  validate-config  - Validate configuration file"
-        echo "  edit-config      - Edit configuration with nano"
-        echo "  change-passphrase - Change GPG encryption passphrase"
+        echo ""
+        echo "🔄 Sync Commands:"
+        echo "  test-sync        - Test available sync clients"
+        echo "  setup-sync       - Interactive sync setup wizard"
+        echo "  setup-onedrive   - Setup OneDrive client specifically"
+        echo "  sync-status      - Show sync clients status"
         ;;
 esac

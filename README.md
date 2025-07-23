@@ -14,6 +14,63 @@
 
 ---
 
+## 🔄 Sync Clients
+
+Hedgii supports multiple sync clients for maximum flexibility:
+
+### **🎯 Auto-Detection (Recommended)**
+Hedgii automatically chooses the best available sync client:
+- **OneDrive client** for OneDrive (more stable, faster)
+- **rclone** for other cloud providers or as fallback
+
+### **🌥️ Supported Sync Methods**
+
+#### **rclone (Universal)**
+- Supports 40+ cloud providers
+- Battle-tested and reliable
+- Great for multi-cloud setups
+
+```bash
+# Configure rclone
+rclone config
+
+# Test connection
+rclone ls onedrive:
+```
+
+#### **OneDrive Client (OneDrive Optimized)**
+- Dedicated OneDrive client by abraunegg
+- Better performance for OneDrive
+- Native Linux integration
+
+```bash
+# Setup OneDrive client
+hedgii setup-onedrive
+
+# Or use the wizard
+hedgii setup-sync
+```
+
+### **🔧 Sync Configuration**
+
+```json
+{
+  "settings": {
+    "sync_method": "auto",           // auto, rclone, or onedrive
+    "cloud_provider": "onedrive",    // Helps auto-detection
+    
+    // rclone settings
+    "rclone_remote": "onedrive:hedgii-backups/",
+    
+    // OneDrive client settings
+    "onedrive_backup_dir": "hedgii-backups",
+    "onedrive_config_dir": "/etc/hedgii/onedrive"
+  }
+}
+```
+
+---
+
 ## 🌟 Why Choose Hedgii?
 
 Hedgii isn't just another backup script - it's your kawaii guardian that protects your data with the determination of a protective hedgehog! 🦔
@@ -26,85 +83,60 @@ Hedgii isn't just another backup script - it's your kawaii guardian that protect
 - **🎨 Kawaii logging** - because backup logs should be cute too!
 - **⚡ Timeout protection** - no more hanging scripts
 - **📊 Comprehensive reporting** - know exactly what was backed up
-- **⏰ Automatic scheduling** - daily backups without thinking about it
 
 ### 🚀 **Advanced Capabilities**
+- **Multi-sync support** - rclone AND abraunegg/onedrive compatibility
+- **Auto-detection** - automatically chooses the best sync method
 - **Custom script execution** for database dumps and exports
 - **Flexible JSON configuration** - no more hardcoded paths
 - **Intelligent error handling** with continue-on-error options
 - **Staging directory management** - clean and organized
-- **Automatic cleanup** of old backups and logs
+- **Automatic cleanup** of old backups
+- **Interactive setup wizard** for sync clients
 - **Detailed logging** with kawaii emojis for easy reading
-- **System integration** with aliases and cron jobs
 
 ---
 
 ## 🚀 Quick Start
 
-### **One-liner Installation**
+### **One-liner Installation** (Coming Soon!)
 ```bash
-# Clone and install Hedgii
-git clone https://github.com/damienmarill/hedgii.git
-cd hedgii
-sudo ./install.sh
+curl -fsSL https://raw.githubusercontent.com/damienmarill/hedgii/main/install.sh | sudo bash
 ```
 
-### **What the installation does:**
-- ✅ Installs all dependencies (jq, gpg, rclone, rsync)
-- ✅ Sets up configuration directory (`/etc/hedgii/`)
-- ✅ Creates automatic daily backup cron job
-- ✅ Configures log rotation
-- ✅ Adds convenient bash aliases
-- ✅ Sets up secure GPG passphrase
+### **Manual Installation**
+```bash
+# Clone the kawaii repository
+git clone https://github.com/damienmarill/hedgii.git
+cd hedgii
+
+# Make hedgii executable
+chmod +x hedgii.sh
+
+# Create configuration directory
+sudo mkdir -p /etc/hedgii
+
+# Copy example configuration
+sudo cp config/hedgii_config.json.example /etc/hedgii/hedgii_config.json
+
+# Set up GPG passphrase
+echo "your_super_secret_passphrase" | sudo tee /etc/hedgii/gpg_passphrase
+sudo chmod 600 /etc/hedgii/gpg_passphrase
+
+# Configure rclone for your cloud storage
+rclone config
+```
 
 ### **First Backup**
 ```bash
-# Configure rclone for your cloud storage
-rclone config
-
-# Edit your backup sources (optional - works out of the box)
-hedgii-config
-
 # Test your configuration
-hedgii validate-config
+sudo ./hedgii.sh validate-config
 
 # Test custom commands only
-hedgii test-commands
+sudo ./hedgii.sh test-commands
 
 # Run your first backup! 🎉
-hedgii-backup
-```
-
----
-
-## 🎮 Commands
-
-Hedgii comes with several kawaii commands to manage your backups:
-
-```bash
-# 🦔 Main backup command
-hedgii curl            # or simply: hedgii
-
-# 👀 Check backup status
-hedgii peek
-
-# 🛡️ View protection status
-hedgii guard
-
-# 🧪 Test custom commands without full backup
-hedgii test-commands
-
-# ✅ Validate configuration file
-hedgii validate-config
-```
-
-### **Convenient Aliases** (added during installation)
-```bash
-hedgii-backup     # Run backup (hedgii curl)
-hedgii-status     # Check status (hedgii peek)
-hedgii-config     # Edit configuration
-hedgii-logs       # View logs in real-time
-hedgii-test       # Test custom commands
+sudo ./hedgii.sh curl
 ```
 
 ---
@@ -146,19 +178,57 @@ Hedgii uses a simple JSON configuration file that's both powerful and easy to un
 - `destination`: Relative path in backup archive
 - `description`: Kawaii description for logs
 
-#### **custom_commands** ✨ (New!)
+#### **custom_commands**
 - `command`: Shell command to execute
 - `description`: What this command does
 - `output_file`: Where to save the command output
 - `timeout`: Maximum execution time (seconds)
-- `working_dir`: Directory to run command in (optional)
+- `working_dir`: Directory to run command in
 - `continue_on_error`: Whether to continue if command fails
 
 #### **settings**
 - `staging_dir`: Temporary directory for backup preparation
 - `backup_dir`: Local directory for encrypted backups
 - `rclone_remote`: Cloud storage destination
-- `encrypt_passphrase_file`: Path to GPG passphrase file
+
+---
+
+## 🎮 Commands
+
+Hedgii comes with several kawaii commands to manage your backups:
+
+```bash
+# 🦔 Main backup command
+sudo hedgii curl
+
+# 👀 Check backup status
+sudo hedgii peek
+
+# 🛡️ View protection status
+sudo hedgii guard
+
+# 🧪 Test custom commands without full backup
+sudo hedgii test-commands
+
+# ✅ Validate configuration file
+sudo hedgii validate-config
+```
+
+### **🔄 Sync Commands**
+
+```bash
+# 🧪 Test available sync clients
+sudo hedgii test-sync
+
+# 🔧 Interactive sync setup wizard
+sudo hedgii setup-sync
+
+# 📤 Setup OneDrive client specifically
+sudo hedgii setup-onedrive
+
+# 📊 Show sync clients status
+sudo hedgii sync-status
+```
 
 ---
 
@@ -185,12 +255,6 @@ Hedgii uses a simple JSON configuration file that's both powerful and easy to un
       "description": "📊 MySQL databases",
       "output_file": "databases/mysql.sql",
       "timeout": 600
-    },
-    {
-      "command": "docker ps -a --format 'table {{.Names}}\\t{{.Status}}'",
-      "description": "🐳 Docker containers",
-      "output_file": "system/docker_status.txt",
-      "timeout": 60
     }
   ]
 }
@@ -218,11 +282,6 @@ Hedgii uses a simple JSON configuration file that's both powerful and easy to un
       "description": "🎼 PHP dependencies",
       "output_file": "dependencies/composer.txt",
       "working_dir": "/home/developer/projects/main-project"
-    },
-    {
-      "command": "systemctl list-units --type=service --state=active",
-      "description": "🔧 Active services",
-      "output_file": "system/services.txt"
     }
   ]
 }
@@ -232,44 +291,68 @@ Hedgii uses a simple JSON configuration file that's both powerful and easy to un
 
 ## 🔧 Advanced Usage
 
-### **Automated Backups** ⏰
-The installation automatically creates a daily cron job:
-```bash
-# View current cron schedule
-cat /etc/cron.d/hedgii-backup
+### **Sync Client Setup**
 
-# Modify schedule (edit the file)
-sudo nano /etc/cron.d/hedgii-backup
+#### **Option 1: OneDrive Client (Recommended for OneDrive)**
+```bash
+# Install OneDrive client (done automatically by installer)
+# Or manually: https://github.com/abraunegg/onedrive
+
+# Setup with Hedgii
+sudo hedgii setup-onedrive
+
+# Test connection
+sudo hedgii test-sync
 ```
 
-### **Custom Scripts Integration** 🔧
+#### **Option 2: rclone (Universal)**
+```bash
+# Configure rclone
+rclone config
+
+# Test connection
+rclone ls onedrive:
+
+# Update Hedgii config to use rclone
+sudo hedgii setup-sync
+```
+
+#### **Option 3: Auto-Detection (Best of Both)**
+```json
+{
+  "settings": {
+    "sync_method": "auto",
+    "cloud_provider": "onedrive"
+  }
+}
+```
+
+### **Automated Backups with Cron**
+```bash
+# Daily backup at 2 AM (configured automatically)
+# Check with: cat /etc/cron.d/hedgii-backup
+
+# Manual cron setup if needed
+echo "0 2 * * * root /usr/local/bin/hedgii curl >> /var/log/hedgii/cron.log 2>&1" | sudo tee /etc/cron.d/hedgii-backup
+```
+
+### **Custom Scripts Integration**
 Hedgii can execute any shell command as part of your backup:
 
-**Database Dumps:**
 ```json
 {
-  "command": "pg_dumpall --clean --if-exists",
-  "description": "🐘 PostgreSQL full dump",
-  "output_file": "databases/postgresql.sql",
-  "timeout": 900
-}
-```
-
-**System Information:**
-```json
-{
-  "command": "dpkg --get-selections",
-  "description": "📦 Installed packages",
-  "output_file": "system/packages.txt"
-}
-```
-
-**Application State:**
-```json
-{
-  "command": "redis-cli --scan --pattern '*' | head -100",
-  "description": "🔴 Redis keys sample",
-  "output_file": "databases/redis_keys.txt"
+  "custom_commands": [
+    {
+      "command": "docker ps -a --format 'table {{.Names}}\\t{{.Status}}'",
+      "description": "🐳 Docker containers status",
+      "output_file": "system/docker_status.txt"
+    },
+    {
+      "command": "systemctl list-units --type=service --state=active",
+      "description": "🔧 Active system services",
+      "output_file": "system/services.txt"
+    }
+  ]
 }
 ```
 
@@ -279,14 +362,13 @@ Hedgii can execute any shell command as part of your backup:
 
 ### **🔐 Encryption**
 - **GPG AES-256 encryption** for all backup archives
-- **Passphrase protection** stored securely with 600 permissions
+- **Passphrase protection** stored securely
 - **No plain text data** ever touches cloud storage
 
 ### **🔒 Access Control**
 - Configuration files secured with proper permissions
 - Staging directories cleaned after each backup
 - Logs contain no sensitive information
-- Backup directory protected with 700 permissions
 
 ### **🚨 Safety Measures**
 - Timeout protection prevents hanging processes
@@ -304,12 +386,6 @@ Every Hedgii backup includes:
 - **🔧 Custom command outputs** and their results
 - **⚙️ Configuration snapshot** used for the backup
 - **🎯 Success/failure status** for each operation
-
-### **Log Management**
-- Automatic log rotation (30 days retention)
-- Colored output for easy reading
-- Real-time log viewing with `hedgii-logs`
-- Separate cron logs for scheduled backups
 
 ---
 
@@ -334,7 +410,7 @@ sudo chmod 600 /etc/hedgii/gpg_passphrase
 ```bash
 # Increase timeout in config or optimize command
 # Test command manually first
-hedgii test-commands
+sudo hedgii test-commands
 ```
 
 **❌ "rclone upload failed"**
@@ -347,37 +423,7 @@ rclone config reconnect onedrive:
 ### **Debug Mode**
 ```bash
 # Run with verbose logging
-bash -x /usr/local/bin/hedgii curl
-```
-
-### **Validation Tools**
-```bash
-# Test configuration syntax
-hedgii validate-config
-
-# Test custom commands only
-hedgii test-commands
-
-# Check system status
-hedgii peek
-```
-
----
-
-## 🗂️ File Locations
-
-After installation, Hedgii uses these locations:
-
-```
-📁 System Locations:
-├── /usr/local/bin/hedgii          # Main script
-├── /usr/bin/hedgii                # Convenient symlink
-├── /etc/hedgii/                   # Configuration directory
-│   ├── hedgii_config.json         # Main configuration
-│   └── gpg_passphrase             # Encryption passphrase
-├── /var/log/hedgii/               # Log files
-├── /var/backups/hedgii/           # Local encrypted backups
-└── /etc/cron.d/hedgii-backup      # Automatic backup schedule
+bash -x hedgii.sh curl
 ```
 
 ---
@@ -400,24 +446,6 @@ cd hedgii
 chmod +x hedgii.sh
 # Start coding! 🎉
 ```
-
----
-
-## 🗑️ Uninstallation
-
-To safely remove Hedgii:
-```bash
-# Download and run uninstall script
-curl -fsSL https://raw.githubusercontent.com/damienmarill/hedgii/main/uninstall.sh | sudo bash
-
-# Or if you have the repository
-sudo ./uninstall.sh
-```
-
-The uninstaller will:
-- Remove all Hedgii components
-- Preserve your encrypted backups by default
-- Ask what to do with configuration and logs
 
 ---
 
