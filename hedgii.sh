@@ -261,7 +261,18 @@ upload_with_onedrive() {
 
     # Copy file to sync directory
     local filename=$(basename "$encrypted_file")
-    local sync_file="$sync_dir/$filename"
+
+    # Get the backup directory from config and create the full path
+    local backup_subdir=$(jq -r '.settings.onedrive_backup_dir // "hedgii-backups"' "$CONFIG_FILE")
+    local target_dir="$sync_dir/$backup_subdir"
+
+    # Create target directory if it doesn't exist
+    if ! mkdir -p "$target_dir"; then
+        hedgii_log "ERROR" "Failed to create target directory: $target_dir"
+        return 1
+    fi
+
+    local sync_file="$target_dir/$filename"
 
     if cp "$encrypted_file" "$sync_file"; then
         hedgii_log "INFO" "File copied to sync directory: $sync_file"
