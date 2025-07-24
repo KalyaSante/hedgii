@@ -173,7 +173,7 @@ monitor_interval = "300"
 ## Monitor log frequency - controls log message suppression
 monitor_log_frequency = "12"
 
-## Monitor fullscan frequency - FIXED: numeric value, not string
+## Monitor fullscan frequency - DOIT RESTER STRING avec guillemets
 monitor_fullscan_frequency = "12"
 
 ## Sync root files when using sync_list
@@ -188,19 +188,14 @@ skip_dotfiles = "true"
 ## Dry run mode
 dry_run = "false"
 
-## Force HTTP version (use force_http_2 for better performance)
-force_http_2 = "false"
-
 ## Classification threshold for "big delete" operations
 classify_as_big_delete = "1000"
 
-## Single directory to sync (relative to OneDrive root)
-single_directory = "$backup_subdir"
-
-## REMOVED DEPRECATED OPTIONS:
-# - min_notify_changes (completely deprecated)
-# - sync_business_shared_folders (deprecated, process changed)
-# - monitor_fullscan_frequency as string (must be numeric)
+## TOUTES LES OPTIONS DÉPRÉCIÉES SUPPRIMÉES:
+# - min_notify_changes (dépréciée)
+# - sync_business_shared_folders (dépréciée) 
+# - force_http_2 (dépréciée)
+# - single_directory (pas une option config, seulement CLI)
 EOF
 
     # Create sync directory
