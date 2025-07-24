@@ -420,13 +420,19 @@ test_sync_clients() {
 cleanup_staging() {
     local staging_dir=$(jq -r '.settings.staging_dir // "/tmp/hedgii_staging"' "$CONFIG_FILE")
 
-    hedgii_log "INFO" "Cleaning staging directory..."
+    hedgii_log "INFO" "Cleaning staging directory..." >&2
 
+    # Remove existing staging directory
     if [[ -d "$staging_dir" ]]; then
         rm -rf "$staging_dir"
+        hedgii_log "INFO" "Removed existing staging directory" >&2
     fi
 
+    # Create fresh staging directory
     mkdir -p "$staging_dir"
+    hedgii_log "INFO" "Created clean staging directory: $staging_dir" >&2
+
+    # 🔧 CORRECTION : Retourner SEULEMENT le chemin sur stdout
     echo "$staging_dir"
 }
 
@@ -632,40 +638,40 @@ EOF
     hedgii_log "INFO" "Report generated: hedgii_backup_report.txt"
 }
 
-# Encrypt the staging directory with format choice
+# Encrypt the staging directory with format choice - CORRECTED VERSION
 encrypt_staging() {
     local staging_dir="$1"
     local backup_dir=$(jq -r '.settings.backup_dir // "/var/backups/hedgii"' "$CONFIG_FILE")
     local passphrase_file=$(jq -r '.settings.encrypt_passphrase_file' "$CONFIG_FILE")
     local compression_format=$(jq -r '.settings.compression_format // "tar.gz"' "$CONFIG_FILE")
-    
+
     mkdir -p "$backup_dir"
 
     # Déterminer l'extension et la commande de compression
     local archive_extension
     local compress_command
-    
+
     case "$compression_format" in
         "zip")
             archive_extension="zip"
-            hedgii_log "INFO" "🦔 Creating ZIP archive for Windows compatibility..."
-            
-            # 🔧 CORRECTION : Créer un fichier ZIP avec redirection silencieuse
+            hedgii_log "INFO" "🦔 Creating ZIP archive for Windows compatibility..." >&2
+
+            # Créer d'abord un fichier ZIP temporaire avec un nom propre
             local temp_zip="/tmp/hedgii_temp_${DATE}.zip"
-            
+
             # Créer l'archive ZIP en silence
             if (cd "$staging_dir" && zip -q -r "$temp_zip" . -x "*.tmp" "*.log.old" "node_modules/*" ".git/*" "*.cache" 2>/dev/null); then
-                hedgii_log "INFO" "ZIP archive created successfully"
+                hedgii_log "INFO" "ZIP archive created successfully" >&2
                 compress_command="cat '$temp_zip'"
             else
-                hedgii_log "ERROR" "Failed to create ZIP archive"
+                hedgii_log "ERROR" "Failed to create ZIP archive" >&2
                 rm -f "$temp_zip"
                 return 1
             fi
             ;;
         "tar.gz"|*)
             archive_extension="tar.gz"
-            hedgii_log "INFO" "🦔 Creating TAR.GZ archive..."
+            hedgii_log "INFO" "🦔 Creating TAR.GZ archive..." >&2
             compress_command="tar -czf - -C '$staging_dir' . 2>/dev/null"
             ;;
     esac
@@ -673,25 +679,26 @@ encrypt_staging() {
     # Générer le nom de fichier final de façon sûre
     local encrypted_file="$backup_dir/hedgii_backup_${DATE}.${archive_extension}.gpg"
 
-    hedgii_log "INFO" "Curling up into a protective ball... 🦔"
-    hedgii_log "INFO" "Output file: $(basename "$encrypted_file")"
+    hedgii_log "INFO" "Curling up into a protective ball... 🦔" >&2
+    hedgii_log "INFO" "Output file: $(basename "$encrypted_file")" >&2
 
-    # 🔧 CORRECTION : Exécuter compression et chiffrement avec gestion d'erreur propre
+    # Exécuter compression et chiffrement avec gestion d'erreur propre
     if eval "$compress_command" 2>/dev/null | gpg --symmetric --cipher-algo AES256 \
         --batch --yes --passphrase-file "$passphrase_file" \
         --output "$encrypted_file" 2>/dev/null; then
 
-        hedgii_log "INFO" "Encryption successful: $encrypted_file"
-        
+        hedgii_log "INFO" "Encryption successful: $encrypted_file" >&2
+
         # Nettoyer le fichier ZIP temporaire si nécessaire
         if [[ "$compression_format" == "zip" ]]; then
             rm -f "/tmp/hedgii_temp_${DATE}.zip"
         fi
-        
+
+        # 🔧 CORRECTION : Retourner SEULEMENT le chemin du fichier sur stdout
         echo "$encrypted_file"
         return 0
     else
-        hedgii_log "ERROR" "Encryption failed!"
+        hedgii_log "ERROR" "Encryption failed!" >&2
         
         # Nettoyer le fichier ZIP temporaire si nécessaire
         if [[ "$compression_format" == "zip" ]]; then
@@ -702,6 +709,7 @@ encrypt_staging() {
     fi
 }
 
+# Main backup function with multi-sync support
 # Main backup function with multi-sync support
 hedgii_curl() {
     hedgii_log "KAWAII" "🦔 Hedgii is ready to protect your data with enhanced sync powers! ✨"
@@ -719,13 +727,20 @@ hedgii_curl() {
     # Generate comprehensive report
     generate_backup_report "$staging_dir"
 
+    # 🔧 CORRECTION : Capturer seulement stdout, ignorer stderr
     local encrypted_file
-    if encrypted_file=$(encrypt_staging "$staging_dir"); then
-        if smart_upload_to_cloud "$encrypted_file"; then
-            hedgii_log "KAWAII" "🎉 Backup completed successfully! Your data is safe! (≧◡≦)"
-            rm -rf "$staging_dir"
+    if encrypted_file=$(encrypt_staging "$staging_dir" 2>&1 | tail -n1); then
+        # Vérifier que nous avons bien un fichier valide
+        if [[ -f "$encrypted_file" ]]; then
+            if smart_upload_to_cloud "$encrypted_file"; then
+                hedgii_log "KAWAII" "🎉 Backup completed successfully! Your data is safe! (≧◡≦)"
+                rm -rf "$staging_dir"
+            else
+                hedgii_log "ERROR" "Upload failed, keeping local backup"
+            fi
         else
-            hedgii_log "ERROR" "Upload failed, keeping local backup"
+            hedgii_log "ERROR" "Encryption failed - no valid file produced"
+            exit 1
         fi
     else
         hedgii_log "ERROR" "Backup failed!"
