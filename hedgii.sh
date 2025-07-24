@@ -22,17 +22,36 @@ BLUE='\033[1;34m'
 NC='\033[0m'
 
 # Kawaii logging function
+# Kawaii logging function - ULTRA ROBUST VERSION
 hedgii_log() {
     local level="$1"
     shift
     local message="$*"
+    local timestamp="$(date '+%Y-%m-%d %H:%M:%S')"
 
-    case "$level" in
-        "INFO")  echo -e "${GREEN}🦔 [INFO]${NC} $message" | tee -a "$LOG_FILE" ;;
-        "WARN")  echo -e "${YELLOW}⚠️  [WARN]${NC} $message" | tee -a "$LOG_FILE" ;;
-        "ERROR") echo -e "${RED}💥 [ERROR]${NC} $message" | tee -a "$LOG_FILE" ;;
-        "KAWAII") echo -e "${PINK}✨ [HEDGII]${NC} $message" | tee -a "$LOG_FILE" ;;
-    esac
+    # Message propre pour le fichier (sans couleurs)
+    local clean_message="[$timestamp] 🦔 [$level] $message"
+
+    # Message avec couleurs pour le terminal (seulement si c'est un terminal)
+    if [[ -t 1 ]]; then
+        case "$level" in
+            "INFO")   echo -e "${GREEN}🦔 [INFO]${NC} $message" ;;
+            "WARN")   echo -e "${YELLOW}⚠️  [WARN]${NC} $message" ;;
+            "ERROR")  echo -e "${RED}💥 [ERROR]${NC} $message" ;;
+            "KAWAII") echo -e "${PINK}✨ [HEDGII]${NC} $message" ;;
+        esac
+    else
+        # Pas de couleurs si pas un terminal
+        case "$level" in
+            "INFO")   echo "🦔 [INFO] $message" ;;
+            "WARN")   echo "⚠️  [WARN] $message" ;;
+            "ERROR")  echo "💥 [ERROR] $message" ;;
+            "KAWAII") echo "✨ [HEDGII] $message" ;;
+        esac
+    fi
+
+    # Toujours écrire proprement dans le fichier log
+    echo "$clean_message" >> "$LOG_FILE"
 }
 
 # Check dependencies
@@ -631,11 +650,11 @@ encrypt_staging() {
             archive_extension="zip"
             hedgii_log "INFO" "🦔 Creating ZIP archive for Windows compatibility..."
             
-            # Créer d'abord un fichier ZIP temporaire
-            local temp_zip="/tmp/hedgii_temp_$DATE.zip"
+            # 🔧 CORRECTION : Créer un fichier ZIP avec redirection silencieuse
+            local temp_zip="/tmp/hedgii_temp_${DATE}.zip"
             
-            # Créer l'archive ZIP depuis le répertoire de staging
-            if (cd "$staging_dir" && zip -r "$temp_zip" . -x "*.tmp" "*.log.old" "node_modules/*" ".git/*" "*.cache"); then
+            # Créer l'archive ZIP en silence
+            if (cd "$staging_dir" && zip -q -r "$temp_zip" . -x "*.tmp" "*.log.old" "node_modules/*" ".git/*" "*.cache" 2>/dev/null); then
                 hedgii_log "INFO" "ZIP archive created successfully"
                 compress_command="cat '$temp_zip'"
             else
@@ -647,25 +666,26 @@ encrypt_staging() {
         "tar.gz"|*)
             archive_extension="tar.gz"
             hedgii_log "INFO" "🦔 Creating TAR.GZ archive..."
-            compress_command="tar -czf - -C '$staging_dir' ."
+            compress_command="tar -czf - -C '$staging_dir' . 2>/dev/null"
             ;;
     esac
 
-    local encrypted_file="$backup_dir/hedgii_backup_$DATE.$archive_extension.gpg"
+    # Générer le nom de fichier final de façon sûre
+    local encrypted_file="$backup_dir/hedgii_backup_${DATE}.${archive_extension}.gpg"
 
     hedgii_log "INFO" "Curling up into a protective ball... 🦔"
     hedgii_log "INFO" "Output file: $(basename "$encrypted_file")"
 
-    # Exécuter la compression et le chiffrement
-    if eval "$compress_command" | gpg --symmetric --cipher-algo AES256 \
+    # 🔧 CORRECTION : Exécuter compression et chiffrement avec gestion d'erreur propre
+    if eval "$compress_command" 2>/dev/null | gpg --symmetric --cipher-algo AES256 \
         --batch --yes --passphrase-file "$passphrase_file" \
-        --output "$encrypted_file"; then
+        --output "$encrypted_file" 2>/dev/null; then
 
         hedgii_log "INFO" "Encryption successful: $encrypted_file"
         
         # Nettoyer le fichier ZIP temporaire si nécessaire
         if [[ "$compression_format" == "zip" ]]; then
-            rm -f "/tmp/hedgii_temp_$DATE.zip"
+            rm -f "/tmp/hedgii_temp_${DATE}.zip"
         fi
         
         echo "$encrypted_file"
@@ -675,7 +695,7 @@ encrypt_staging() {
         
         # Nettoyer le fichier ZIP temporaire si nécessaire
         if [[ "$compression_format" == "zip" ]]; then
-            rm -f "/tmp/hedgii_temp_$DATE.zip"
+            rm -f "/tmp/hedgii_temp_${DATE}.zip"
         fi
         
         return 1
