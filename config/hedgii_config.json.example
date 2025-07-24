@@ -117,6 +117,7 @@
     "staging_dir": "/tmp/hedgii_staging",
     "backup_dir": "/var/backups/hedgii",
     "encrypt_passphrase_file": "/etc/hedgii/gpg_passphrase",
+    "compression_format": "zip",
 
     "sync_method": "auto",
     "cloud_provider": "onedrive",

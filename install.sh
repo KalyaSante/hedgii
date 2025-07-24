@@ -150,17 +150,17 @@ install_dependencies() {
                 install_packages_individually_apt
             else
                 # Normal installation
-                if ! apt-get install -y jq gpg rsync curl cron logrotate; then
+                if ! apt-get install -y jq gpg rsync curl cron logrotate zip; then
                     hedgii_install_log "WARN" "Bulk installation failed, trying individual packages..."
                     install_packages_individually_apt
                 fi
             fi
             ;;
         "yum"|"dnf")
-            $package_manager install -y jq gnupg2 rsync curl crontabs logrotate
+            $package_manager install -y jq gnupg2 rsync curl crontabs logrotate zip
             ;;
         "pacman")
-            pacman -Sy --noconfirm jq gnupg rsync curl cronie logrotate
+            pacman -Sy --noconfirm jq gnupg rsync curl cronie logrotate zip
             ;;
     esac
 
@@ -304,7 +304,7 @@ install_onedrive_from_source() {
 
 # Install packages individually for problematic apt systems
 install_packages_individually_apt() {
-    local packages=("jq" "gpg" "rsync" "curl" "cron" "logrotate")
+    local packages=("jq" "gpg" "rsync" "curl" "cron" "logrotate" "zip")
     local failed_packages=()
 
     hedgii_install_log "INFO" "Installing packages individually..."
@@ -410,6 +410,7 @@ setup_configuration() {
     "staging_dir": "/tmp/hedgii_staging",
     "backup_dir": "/var/backups/hedgii",
     "encrypt_passphrase_file": "/etc/hedgii/gpg_passphrase",
+    "compression_format": "zip",
     "rclone_remote": "onedrive:hedgii-backups/"
   },
   "exclusions": [
@@ -590,7 +591,7 @@ test_installation() {
     fi
 
     # Test dependencies with fallback checks
-    local deps=("jq" "gpg" "rsync" "rclone")
+    local deps=("jq" "gpg" "rsync" "zip" "rclone")
     local missing_deps=()
 
     for dep in "${deps[@]}"; do
@@ -611,6 +612,7 @@ test_installation() {
                 "jq") hedgii_install_log "INFO" "  - jq: sudo apt-get install jq (or download from https://github.com/stedolan/jq/releases)" ;;
                 "gpg") hedgii_install_log "INFO" "  - gpg: sudo apt-get install gpg gnupg" ;;
                 "rsync") hedgii_install_log "INFO" "  - rsync: sudo apt-get install rsync" ;;
+                "zip") hedgii_install_log "INFO" "  - zip: sudo apt-get install zip" ;;
                 "rclone") hedgii_install_log "INFO" "  - rclone: curl https://rclone.org/install.sh | sudo bash" ;;
             esac
         done

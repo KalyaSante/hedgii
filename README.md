@@ -143,7 +143,24 @@ sudo ./hedgii.sh curl
 
 ## 📋 Configuration
 
-Hedgii uses a simple JSON configuration file that's both powerful and easy to understand:
+Hedgii uses a comprehensive JSON configuration file that gives you full control over your backup process. The configuration is located at `/etc/hedgii/hedgii_config.json`.
+
+### 🗂️ **Configuration Structure**
+
+```json
+{
+  "backup_sources": [...],
+  "custom_commands": [...],
+  "settings": {...},
+  "exclusions": [...]
+}
+```
+
+---
+
+### 📁 **backup_sources** - File & Directory Sources
+
+Define which files and directories to include in your backup:
 
 ```json
 {
@@ -152,44 +169,410 @@ Hedgii uses a simple JSON configuration file that's both powerful and easy to un
       "source": "/var/www/html",
       "destination": "web/html",
       "description": "🌐 Main website files"
+    },
+    {
+      "source": "/etc/nginx/sites-available",
+      "destination": "config/nginx",
+      "description": "⚙️ Nginx configuration"
     }
-  ],
+  ]
+}
+```
+
+**Parameters:**
+- `source` *(string, required)*: Absolute path to file or directory to backup
+- `destination` *(string, required)*: Relative path in backup archive (no leading slash)
+- `description` *(string, required)*: Human-readable description for logs (kawaii emojis encouraged! ✨)
+
+**Notes:**
+- Directories are copied recursively with `rsync`
+- Automatic exclusions apply (see exclusions section)
+- Source paths are validated before backup
+
+---
+
+### 🔧 **custom_commands** - Dynamic Data Collection
+
+Execute commands to capture database dumps, system state, and more:
+
+```json
+{
   "custom_commands": [
     {
-      "command": "mysqldump --all-databases --single-transaction",
+      "command": "mysqldump --all-databases --single-transaction --routines --triggers",
       "description": "📊 Complete MySQL database dump",
-      "output_file": "databases/mysql_dump.sql",
+      "output_file": "databases/mysql_full_dump.sql",
       "timeout": 600,
+      "working_dir": "/tmp",
       "continue_on_error": false
+    },
+    {
+      "command": "docker ps -a --format 'table {{.Names}}\\t{{.Status}}'",
+      "description": "🐳 Docker containers status",
+      "output_file": "system/docker_status.txt",
+      "timeout": 60,
+      "working_dir": "/tmp",
+      "continue_on_error": true
     }
-  ],
+  ]
+}
+```
+
+**Parameters:**
+- `command` *(string, required)*: Shell command to execute
+- `description` *(string, required)*: Human-readable description for logs
+- `output_file` *(string, required)*: Relative path where command output is saved
+- `timeout` *(integer, optional)*: Maximum execution time in seconds (default: 300)
+- `working_dir` *(string, optional)*: Directory to execute command in (default: "/tmp")
+- `continue_on_error` *(boolean, optional)*: Whether to continue backup if command fails (default: true)
+
+**Command Examples:**
+```json
+// Database dumps
+{
+  "command": "pg_dumpall --clean --if-exists",
+  "description": "🐘 PostgreSQL full dump",
+  "output_file": "databases/postgresql_dump.sql",
+  "timeout": 900
+}
+
+// System information
+{
+  "command": "systemctl list-units --type=service --state=active --no-pager",
+  "description": "🔧 Active system services",
+  "output_file": "system/active_services.txt"
+}
+
+// Application-specific
+{
+  "command": "composer show --installed --format=json",
+  "description": "🎼 Composer dependencies",
+  "output_file": "development/composer_packages.json",
+  "working_dir": "/var/www/html"
+}
+```
+
+---
+
+### ⚙️ **settings** - Core Configuration
+
+Control Hedgii's behavior and sync options:
+
+```json
+{
   "settings": {
     "staging_dir": "/tmp/hedgii_staging",
     "backup_dir": "/var/backups/hedgii",
-    "rclone_remote": "onedrive:hedgii-backups/"
+    "encrypt_passphrase_file": "/etc/hedgii/gpg_passphrase",
+    "compression_format": "zip",
+    
+    "sync_method": "auto",
+    "cloud_provider": "onedrive",
+    
+    "rclone_remote": "onedrive:hedgii-backups/",
+    
+    "onedrive_backup_dir": "hedgii-backups",
+    "onedrive_config_dir": "/etc/hedgii/onedrive"
   }
 }
 ```
 
-### **Configuration Options**
+#### **🗂️ Backup & Storage Settings**
 
-#### **backup_sources**
-- `source`: Path to file or directory to backup
-- `destination`: Relative path in backup archive
-- `description`: Kawaii description for logs
+- `staging_dir` *(string, optional)*: Temporary directory for backup preparation
+  - Default: `"/tmp/hedgii_staging"`
+  - Must be writable by hedgii user
+  - Cleaned up after each backup
 
-#### **custom_commands**
-- `command`: Shell command to execute
-- `description`: What this command does
-- `output_file`: Where to save the command output
-- `timeout`: Maximum execution time (seconds)
-- `working_dir`: Directory to run command in
-- `continue_on_error`: Whether to continue if command fails
+- `backup_dir` *(string, optional)*: Local directory for encrypted backup files
+  - Default: `"/var/backups/hedgii"`
+  - Directory is created if it doesn't exist
+  - Should have sufficient space for temporary encrypted files
 
-#### **settings**
-- `staging_dir`: Temporary directory for backup preparation
-- `backup_dir`: Local directory for encrypted backups
-- `rclone_remote`: Cloud storage destination
+- `encrypt_passphrase_file` *(string, required)*: Path to GPG passphrase file
+  - Must be readable by hedgii user only (chmod 600)
+  - Contains plain text passphrase for GPG encryption
+  - Example setup: `echo "your_passphrase" | sudo tee /etc/hedgii/gpg_passphrase && sudo chmod 600 /etc/hedgii/gpg_passphrase`
+
+- `compression_format` *(string, optional)*: Archive format before encryption
+  - Options: `"zip"` or `"tar.gz"`
+  - Default: `"tar.gz"`
+  - **`"zip"`**: Windows-friendly, better integration, native support
+  - **`"tar.gz"`**: Unix-standard, better compression, preserves permissions
+  - Affects output filename: `hedgii_backup_YYYYMMDD_HHMMSS.{zip|tar.gz}.gpg`
+
+#### **☁️ Sync Method Configuration**
+
+- `sync_method` *(string, optional)*: Which sync client to use
+  - Options: `"auto"`, `"rclone"`, `"onedrive"`
+  - Default: `"auto"`
+  - **`"auto"`**: Automatically detects and chooses best available client
+  - **`"rclone"`**: Force use of rclone (universal, 40+ cloud providers)
+  - **`"onedrive"`**: Force use of OneDrive client (OneDrive-optimized)
+
+- `cloud_provider` *(string, optional)*: Helps auto-detection choose optimal client
+  - Options: `"onedrive"`, `"googledrive"`, `"dropbox"`, etc.
+  - Default: `"onedrive"`
+  - Used when `sync_method` is `"auto"`
+
+#### **🔄 rclone Configuration**
+
+- `rclone_remote` *(string, optional)*: rclone remote path for uploads
+  - Format: `"remote_name:path/"`
+  - Default: `"onedrive:hedgii-backups/"`
+  - Configure remotes with: `rclone config`
+  - Test with: `rclone ls remote_name:`
+
+#### **📤 OneDrive Client Configuration**
+
+- `onedrive_backup_dir` *(string, optional)*: Directory name in OneDrive
+  - Default: `"hedgii-backups"`
+  - Created automatically if it doesn't exist
+  - All backups stored in this folder
+
+- `onedrive_config_dir` *(string, optional)*: Local OneDrive client config directory
+  - Default: `"/etc/hedgii/onedrive"`
+  - Contains OneDrive client configuration and sync cache
+  - Created during `hedgii setup-onedrive`
+
+---
+
+### 🚫 **exclusions** - File Exclusion Patterns
+
+Patterns to exclude from all backups (applied to both file sources and custom command outputs):
+
+```json
+{
+  "exclusions": [
+    "*.tmp",
+    "*.log.old",
+    "node_modules",
+    ".git",
+    "*.cache",
+    ".DS_Store",
+    "Thumbs.db"
+  ]
+}
+```
+
+**Parameters:**
+- Array of glob patterns (shell wildcards)
+- Applied during `rsync` and `zip` operations
+- Case-sensitive matching
+- Relative to source directories
+
+**Common Exclusion Patterns:**
+```json
+[
+  // Temporary files
+  "*.tmp", "*.temp", "*.swp", "*~",
+  
+  // Logs (keep current, exclude rotated)
+  "*.log.old", "*.log.[0-9]*", "*.log.gz",
+  
+  // Development
+  "node_modules", ".git", ".svn", ".hg",
+  "vendor", "bower_components",
+  
+  // Cache directories
+  "*.cache", "cache/*", ".cache",
+  
+  // OS files
+  ".DS_Store", "Thumbs.db", "desktop.ini",
+  
+  // Build artifacts
+  "dist", "build", "*.min.js", "*.min.css"
+]
+```
+
+---
+
+### 🎯 **Complete Configuration Examples**
+
+#### **Web Server with Database**
+```json
+{
+  "backup_sources": [
+    {
+      "source": "/var/www/html",
+      "destination": "web/html",
+      "description": "🌐 Main website files"
+    },
+    {
+      "source": "/etc/nginx",
+      "destination": "config/nginx",
+      "description": "⚙️ Nginx configuration"
+    },
+    {
+      "source": "/etc/ssl/certs/mydomain.crt",
+      "destination": "security/ssl_cert.crt",
+      "description": "🔐 SSL certificate"
+    }
+  ],
+  "custom_commands": [
+    {
+      "command": "mysqldump --all-databases --single-transaction --routines --triggers",
+      "description": "📊 Complete MySQL database dump",
+      "output_file": "databases/mysql_full_dump.sql",
+      "timeout": 600,
+      "continue_on_error": false
+    },
+    {
+      "command": "nginx -T",
+      "description": "🔧 Nginx configuration test and dump",
+      "output_file": "config/nginx_full_config.txt",
+      "timeout": 30
+    }
+  ],
+  "settings": {
+    "compression_format": "zip",
+    "sync_method": "auto",
+    "cloud_provider": "onedrive"
+  },
+  "exclusions": [
+    "*.log.old", "*.tmp", "cache/*", ".git"
+  ]
+}
+```
+
+#### **Development Environment**
+```json
+{
+  "backup_sources": [
+    {
+      "source": "/home/developer/projects",
+      "destination": "projects",
+      "description": "💻 Development projects"
+    },
+    {
+      "source": "/home/developer/.ssh",
+      "destination": "security/ssh",
+      "description": "🔐 SSH keys and config"
+    }
+  ],
+  "custom_commands": [
+    {
+      "command": "git log --oneline --graph -20",
+      "description": "🌳 Recent git commits",
+      "output_file": "git/recent_commits.txt",
+      "working_dir": "/home/developer/projects/main-project",
+      "timeout": 30
+    },
+    {
+      "command": "npm list --depth=0 --json",
+      "description": "📦 NPM dependencies",
+      "output_file": "dependencies/npm_packages.json",
+      "working_dir": "/home/developer/projects/frontend",
+      "continue_on_error": true
+    },
+    {
+      "command": "docker images --format 'table {{.Repository}}:{{.Tag}}\\t{{.Size}}\\t{{.CreatedAt}}'",
+      "description": "🐳 Docker images inventory",
+      "output_file": "system/docker_images.txt",
+      "timeout": 60
+    }
+  ],
+  "settings": {
+    "compression_format": "zip",
+    "sync_method": "rclone",
+    "rclone_remote": "googledrive:backups/dev-machine/"
+  },
+  "exclusions": [
+    "node_modules", ".git", "dist", "build", 
+    "*.log", "*.tmp", ".cache", "vendor"
+  ]
+}
+```
+
+#### **Docker Production Server**
+```json
+{
+  "backup_sources": [
+    {
+      "source": "/opt/docker-compose",
+      "destination": "docker/compose",
+      "description": "🐳 Docker compose files"
+    },
+    {
+      "source": "/var/lib/docker/volumes",
+      "destination": "docker/volumes",
+      "description": "💾 Docker persistent volumes"
+    }
+  ],
+  "custom_commands": [
+    {
+      "command": "docker-compose config",
+      "description": "🔧 Docker compose configuration",
+      "output_file": "docker/resolved_compose.yml",
+      "working_dir": "/opt/docker-compose",
+      "timeout": 60
+    },
+    {
+      "command": "docker system df -v",
+      "description": "📊 Docker system usage",
+      "output_file": "system/docker_usage.txt",
+      "timeout": 30
+    },
+    {
+      "command": "docker network ls && docker volume ls",
+      "description": "🌐 Docker networks and volumes",
+      "output_file": "docker/resources.txt",
+      "timeout": 30
+    }
+  ],
+  "settings": {
+    "compression_format": "tar.gz",
+    "sync_method": "auto"
+  }
+}
+```
+
+---
+
+### ⚡ **Configuration Management Commands**
+
+```bash
+# 📝 Edit configuration with nano
+sudo hedgii edit-config
+
+# ✅ Validate configuration syntax
+sudo hedgii validate-config
+
+# 📦 Check current compression format
+sudo hedgii compression-info
+
+# 🔐 Change GPG passphrase
+sudo hedgii change-passphrase
+
+# 🧪 Test custom commands without full backup
+sudo hedgii test-commands
+```
+
+---
+
+### 🔍 **Configuration Validation**
+
+Hedgii automatically validates your configuration:
+
+- **JSON syntax** - Must be valid JSON
+- **Required fields** - Source, destination, description for sources
+- **Path validation** - Source paths must exist and be readable
+- **Command syntax** - Custom commands are validated before execution
+- **Timeout values** - Must be positive integers
+- **File permissions** - Passphrase file must be secure (600 permissions)
+
+**Common Validation Errors:**
+```bash
+# Invalid JSON
+hedgii validate-config
+# Output: ✗ Configuration JSON is invalid
+
+# Missing required field
+# Output: ✗ backup_sources[0].source is missing
+
+# Invalid path
+# Output: ⚠️ Source not found: /nonexistent/path
+```
 
 ---
 
@@ -212,6 +595,15 @@ sudo hedgii test-commands
 
 # ✅ Validate configuration file
 sudo hedgii validate-config
+
+# 📝 Edit configuration with nano
+sudo hedgii edit-config
+
+# 🔐 Change GPG encryption passphrase
+sudo hedgii change-passphrase
+
+# 📦 Show current compression format information
+sudo hedgii compression-info
 ```
 
 ### **🔄 Sync Commands**
