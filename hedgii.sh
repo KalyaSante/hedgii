@@ -174,7 +174,7 @@ monitor_interval = "300"
 monitor_log_frequency = "12"
 
 ## Monitor fullscan frequency - FIXED: numeric value, not string
-monitor_fullscan_frequency = 12
+monitor_fullscan_frequency = "12"
 
 ## Sync root files when using sync_list
 sync_root_files = "false"
@@ -229,9 +229,7 @@ EOF
     hedgii_log "WARN" "⚠️  Manual step required:"
     echo "   Run: sudo onedrive --confdir='$onedrive_config_dir' --auth-files"
     echo "   Then: sudo onedrive --confdir='$onedrive_config_dir' --sync --single-directory='$backup_subdir' --upload-only --dry-run"
-    echo ""
-    hedgii_log "KAWAII" "✨ Config fixed! No more deprecated option errors! (≧◡≦)"
-}
+    }
 
 # Upload using OneDrive client
 upload_with_onedrive() {
