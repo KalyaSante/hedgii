@@ -38,10 +38,25 @@ hedgii_log() {
 # Check dependencies
 check_dependencies() {
     local deps=("jq" "gpg" "rsync")
+    local compression_format=$(jq -r '.settings.compression_format // "tar.gz"' "$CONFIG_FILE" 2>/dev/null || echo "tar.gz")
+
+    # Ajouter zip aux dépendances si nécessaire
+    if [[ "$compression_format" == "zip" ]]; then
+        deps+=("zip")
+    fi
 
     for dep in "${deps[@]}"; do
         if ! command -v "$dep" >/dev/null 2>&1; then
             hedgii_log "ERROR" "Missing dependency: $dep"
+            
+            # Message d'aide spécifique pour zip sur différents systèmes
+            if [[ "$dep" == "zip" ]]; then
+                hedgii_log "INFO" "Install zip with:"
+                hedgii_log "INFO" "  Debian/Ubuntu: sudo apt install zip"
+                hedgii_log "INFO" "  RHEL/CentOS: sudo yum install zip"
+                hedgii_log "INFO" "  Arch: sudo pacman -S zip"
+            fi
+            
             exit 1
         fi
     done
@@ -119,7 +134,7 @@ setup_onedrive_client() {
 sync_dir = "$onedrive_config_dir/sync"
 skip_file = "$onedrive_config_dir/skip_file"
 log_dir = "/var/log/hedgii/"
-drive_id = ""
+#drive_id = ""
 upload_only = true
 check_nomount = false
 check_nosync = false
@@ -557,26 +572,71 @@ EOF
     hedgii_log "INFO" "Report generated: hedgii_backup_report.txt"
 }
 
-# Encrypt the staging directory
+# Encrypt the staging directory with format choice
 encrypt_staging() {
     local staging_dir="$1"
     local backup_dir=$(jq -r '.settings.backup_dir // "/var/backups/hedgii"' "$CONFIG_FILE")
     local passphrase_file=$(jq -r '.settings.encrypt_passphrase_file' "$CONFIG_FILE")
-    local encrypted_file="$backup_dir/hedgii_backup_$DATE.gpg"
-
+    local compression_format=$(jq -r '.settings.compression_format // "tar.gz"' "$CONFIG_FILE")
+    
     mkdir -p "$backup_dir"
 
-    hedgii_log "INFO" "Curling up into a protective ball... 🦔"
+    # Déterminer l'extension et la commande de compression
+    local archive_extension
+    local compress_command
+    
+    case "$compression_format" in
+        "zip")
+            archive_extension="zip"
+            hedgii_log "INFO" "🦔 Creating ZIP archive for Windows compatibility..."
+            
+            # Créer d'abord un fichier ZIP temporaire
+            local temp_zip="/tmp/hedgii_temp_$DATE.zip"
+            
+            # Créer l'archive ZIP depuis le répertoire de staging
+            if (cd "$staging_dir" && zip -r "$temp_zip" . -x "*.tmp" "*.log.old" "node_modules/*" ".git/*" "*.cache"); then
+                hedgii_log "INFO" "ZIP archive created successfully"
+                compress_command="cat '$temp_zip'"
+            else
+                hedgii_log "ERROR" "Failed to create ZIP archive"
+                rm -f "$temp_zip"
+                return 1
+            fi
+            ;;
+        "tar.gz"|*)
+            archive_extension="tar.gz"
+            hedgii_log "INFO" "🦔 Creating TAR.GZ archive..."
+            compress_command="tar -czf - -C '$staging_dir' ."
+            ;;
+    esac
 
-    if tar -czf - -C "$staging_dir" . | gpg --symmetric --cipher-algo AES256 \
+    local encrypted_file="$backup_dir/hedgii_backup_$DATE.$archive_extension.gpg"
+
+    hedgii_log "INFO" "Curling up into a protective ball... 🦔"
+    hedgii_log "INFO" "Output file: $(basename "$encrypted_file")"
+
+    # Exécuter la compression et le chiffrement
+    if eval "$compress_command" | gpg --symmetric --cipher-algo AES256 \
         --batch --yes --passphrase-file "$passphrase_file" \
         --output "$encrypted_file"; then
 
         hedgii_log "INFO" "Encryption successful: $encrypted_file"
+        
+        # Nettoyer le fichier ZIP temporaire si nécessaire
+        if [[ "$compression_format" == "zip" ]]; then
+            rm -f "/tmp/hedgii_temp_$DATE.zip"
+        fi
+        
         echo "$encrypted_file"
         return 0
     else
         hedgii_log "ERROR" "Encryption failed!"
+        
+        # Nettoyer le fichier ZIP temporaire si nécessaire
+        if [[ "$compression_format" == "zip" ]]; then
+            rm -f "/tmp/hedgii_temp_$DATE.zip"
+        fi
+        
         return 1
     fi
 }
@@ -739,6 +799,28 @@ hedgii_edit_config() {
     else
         hedgii_log "WARN" "Editor was cancelled, no changes made"
     fi
+}
+
+# Show compression format info
+show_compression_info() {
+    local compression_format=$(jq -r '.settings.compression_format // "tar.gz"' "$CONFIG_FILE")
+    
+    hedgii_log "INFO" "📦 Current compression format: $compression_format"
+    
+    case "$compression_format" in
+        "zip")
+            hedgii_log "INFO" "   ✓ Windows-friendly ZIP format"
+            hedgii_log "INFO" "   ✓ Better Windows integration"
+            hedgii_log "INFO" "   ✓ Native Windows support"
+            ;;
+        "tar.gz")
+            hedgii_log "INFO" "   ✓ Unix-standard TAR.GZ format"
+            hedgii_log "INFO" "   ✓ Better compression ratio"
+            hedgii_log "INFO" "   ✓ Preserves Unix permissions"
+            ;;
+    esac
+    
+    hedgii_log "INFO" "💡 Change format in config: compression_format"
 }
 
 # Change GPG passphrase
@@ -931,6 +1013,9 @@ case "${1:-curl}" in
     "change-passphrase")
         hedgii_change_passphrase
         ;;
+    "compression-info")
+        show_compression_info
+        ;;
     *)
         echo "🦔 Hedgii Commands:"
         echo "  curl              - Backup your data with enhanced sync (default)"
@@ -940,6 +1025,7 @@ case "${1:-curl}" in
         echo "  validate-config   - Validate configuration file"
         echo "  edit-config       - Edit configuration with nano"
         echo "  change-passphrase - Change GPG encryption passphrase"
+        echo "  compression-info  - Show current compression format information"
         echo ""
         echo "🔄 Sync Commands:"
         echo "  test-sync         - Test available sync clients"
