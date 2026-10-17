@@ -150,17 +150,17 @@ install_dependencies() {
                 install_packages_individually_apt
             else
                 # Normal installation
-                if ! apt-get install -y jq gpg rsync curl cron logrotate zip; then
+                if ! apt-get install -y jq gpg rsync curl cron logrotate zip unzip; then
                     hedgii_install_log "WARN" "Bulk installation failed, trying individual packages..."
                     install_packages_individually_apt
                 fi
             fi
             ;;
         "yum"|"dnf")
-            $package_manager install -y jq gnupg2 rsync curl crontabs logrotate zip
+            $package_manager install -y jq gnupg2 rsync curl crontabs logrotate zip unzip
             ;;
         "pacman")
-            pacman -Sy --noconfirm jq gnupg rsync curl cronie logrotate zip
+            pacman -Sy --noconfirm jq gnupg rsync curl cronie logrotate zip unzip
             ;;
     esac
 
@@ -304,7 +304,7 @@ install_onedrive_from_source() {
 
 # Install packages individually for problematic apt systems
 install_packages_individually_apt() {
-    local packages=("jq" "gpg" "rsync" "curl" "cron" "logrotate" "zip")
+    local packages=("jq" "gpg" "rsync" "curl" "cron" "logrotate" "zip" "unzip")
     local failed_packages=()
 
     hedgii_install_log "INFO" "Installing packages individually..."
@@ -591,7 +591,7 @@ test_installation() {
     fi
 
     # Test dependencies with fallback checks
-    local deps=("jq" "gpg" "rsync" "zip" "rclone")
+    local deps=("jq" "gpg" "rsync" "zip" "unzip" "rclone")
     local missing_deps=()
 
     for dep in "${deps[@]}"; do
@@ -613,6 +613,7 @@ test_installation() {
                 "gpg") hedgii_install_log "INFO" "  - gpg: sudo apt-get install gpg gnupg" ;;
                 "rsync") hedgii_install_log "INFO" "  - rsync: sudo apt-get install rsync" ;;
                 "zip") hedgii_install_log "INFO" "  - zip: sudo apt-get install zip" ;;
+                "unzip") hedgii_install_log "INFO" "  - unzip: sudo apt-get install unzip" ;;
                 "rclone") hedgii_install_log "INFO" "  - rclone: curl https://rclone.org/install.sh | sudo bash" ;;
             esac
         done

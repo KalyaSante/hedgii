@@ -1,5 +1,7 @@
 # 🦔 Hedgii - Your Kawaii Backup Guardian
 
+[![CI](https://github.com/KalyaSante/hedgii/actions/workflows/ci.yml/badge.svg)](https://github.com/KalyaSante/hedgii/actions/workflows/ci.yml)
+
 <div align="center">
   <img src="https://img.shields.io/badge/Status-Protecting%20Your%20Data-brightgreen?style=for-the-badge&logo=data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjQiIGhlaWdodD0iMjQiIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTEyIDJMMTMuMDkgOC4yNkwyMCA5TDEzLjA5IDE1Ljc0TDEyIDIyTDEwLjkxIDE1Ljc0TDQgOUwxMC45MSA4LjI2TDEyIDJaIiBmaWxsPSJjdXJyZW50Q29sb3IiLz4KPC9zdmc+Cg=="/>
   <img src="https://img.shields.io/badge/Made%20with-Bash%20%26%20Love-ff69b4?style=for-the-badge"/>

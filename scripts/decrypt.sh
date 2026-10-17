@@ -3,9 +3,11 @@
 # 🦔 Hedgii Decrypt - Uncurl your protected data
 # Usage: ./decrypt.sh <encrypted_backup_file> [output_directory]
 
-ENCRYPTED_FILE="$1"
+set -o pipefail
+
+ENCRYPTED_FILE="${1:-}"
 OUTPUT_DIR="${2:-/tmp/hedgii_restore}"
-CONFIG_FILE="/etc/hedgii/hedgii_config.json"
+CONFIG_FILE="${HEDGII_CONFIG_FILE:-/etc/hedgii/hedgii_config.json}"
 
 # Colors
 GREEN='\033[1;32m'
@@ -45,13 +47,26 @@ hedgii_log "INFO" "Output directory: $OUTPUT_DIR"
 mkdir -p "$OUTPUT_DIR"
 
 # Decrypt and extract
-if gpg --batch --yes --passphrase-file "$PASSPHRASE_FILE" \
+compression_format=$(jq -r '.settings.compression_format // "tar.gz"' "$CONFIG_FILE")
+if [[ "$compression_format" == "zip" ]]; then
+    decrypted_archive=$(mktemp)
+    trap 'rm -f "$decrypted_archive"' EXIT
+    if gpg --batch --yes --passphrase-file "$PASSPHRASE_FILE" \
+        --output "$decrypted_archive" --decrypt "$ENCRYPTED_FILE" &&
+        unzip -q -o "$decrypted_archive" -d "$OUTPUT_DIR"; then
+        :
+    else
+        hedgii_log "ERROR" "Failed to decrypt backup!"
+        exit 1
+    fi
+elif gpg --batch --yes --passphrase-file "$PASSPHRASE_FILE" \
     --decrypt "$ENCRYPTED_FILE" | tar -xzf - -C "$OUTPUT_DIR"; then
-    
-    hedgii_log "KAWAII" "✅ Successfully uncurled! Your data is restored to: $OUTPUT_DIR"
-    hedgii_log "INFO" "Contents:"
-    ls -la "$OUTPUT_DIR"
+    :
 else
     hedgii_log "ERROR" "Failed to decrypt backup!"
     exit 1
 fi
+
+hedgii_log "KAWAII" "✅ Successfully uncurled! Your data is restored to: $OUTPUT_DIR"
+hedgii_log "INFO" "Contents:"
+ls -la "$OUTPUT_DIR"

@@ -6,9 +6,9 @@
 set -euo pipefail
 
 # Configuration
-CONFIG_FILE="/etc/hedgii/hedgii_config.json"
+CONFIG_FILE="${HEDGII_CONFIG_FILE:-/etc/hedgii/hedgii_config.json}"
 DATE=$(date +%Y%m%d_%H%M%S)
-LOG_FILE="/var/log/hedgii/hedgii_$DATE.log"
+LOG_FILE="${HEDGII_LOG_FILE:-/var/log/hedgii/hedgii_$DATE.log}"
 
 # Create log directory
 mkdir -p "$(dirname "$LOG_FILE")"
@@ -468,7 +468,11 @@ copy_resource() {
     mkdir -p "$dest_dir"
 
     if [[ -d "$source" ]]; then
-        rsync -av --exclude="*.tmp" --exclude=".git" "$source/" "$dest_full/"
+        local rsync_excludes=(--exclude="*.tmp" --exclude=".git")
+        while IFS= read -r exclusion; do
+            rsync_excludes+=(--exclude="$exclusion")
+        done < <(jq -r '.exclusions[]?' "$CONFIG_FILE")
+        rsync -av "${rsync_excludes[@]}" "$source/" "$dest_full/"
     else
         cp "$source" "$dest_full"
     fi
@@ -720,6 +724,26 @@ encrypt_staging() {
     fi
 }
 
+cleanup_old_backups() {
+    local backup_dir="$1"
+    local keep_last
+    keep_last=$(jq -r '.settings.local_keep_last // 0' "$CONFIG_FILE")
+
+    if [[ ! "$keep_last" =~ ^[0-9]+$ ]] || (( keep_last < 1 )); then
+        return 0
+    fi
+
+    local backups=("$backup_dir"/hedgii_backup_*.gpg)
+    if [[ ! -e "${backups[0]}" ]] || (( ${#backups[@]} <= keep_last )); then
+        return 0
+    fi
+
+    local remove_count=$((${#backups[@]} - keep_last))
+    for ((i = 0; i < remove_count; i++)); do
+        rm -f -- "${backups[i]}"
+    done
+}
+
 # Main backup function with multi-sync support
 # Main backup function with multi-sync support
 hedgii_curl() {
@@ -748,7 +772,10 @@ hedgii_curl() {
                 rm -rf "$staging_dir"
             else
                 hedgii_log "ERROR" "Upload failed, keeping local backup"
+                cleanup_old_backups "$(jq -r '.settings.backup_dir // "/var/backups/hedgii"' "$CONFIG_FILE")"
+                exit 4
             fi
+            cleanup_old_backups "$(jq -r '.settings.backup_dir // "/var/backups/hedgii"' "$CONFIG_FILE")"
         else
             hedgii_log "ERROR" "Encryption failed - no valid file produced"
             exit 1
@@ -1042,7 +1069,7 @@ case "${1:-curl}" in
         ;;
     "test-commands")
         hedgii_log "KAWAII" "🦔 Testing custom commands without full backup..."
-        local staging_dir=$(cleanup_staging)
+        staging_dir=$(cleanup_staging)
         execute_custom_commands "$staging_dir"
         hedgii_log "INFO" "Check results in: $staging_dir"
         ;;
@@ -1050,8 +1077,8 @@ case "${1:-curl}" in
         hedgii_log "INFO" "🔍 Validating configuration..."
         if jq empty "$CONFIG_FILE" 2>/dev/null; then
             hedgii_log "INFO" "✓ Configuration JSON is valid"
-            local custom_count=$(jq '.custom_commands | length' "$CONFIG_FILE")
-            local source_count=$(jq '.backup_sources | length' "$CONFIG_FILE")
+            custom_count=$(jq '.custom_commands | length' "$CONFIG_FILE")
+            source_count=$(jq '.backup_sources | length' "$CONFIG_FILE")
             hedgii_log "INFO" "📊 Found $custom_count custom commands, $source_count file sources"
         else
             hedgii_log "ERROR" "✗ Configuration JSON is invalid"
@@ -1072,8 +1099,8 @@ case "${1:-curl}" in
         ;;
     "sync-status")
         hedgii_log "INFO" "📊 Sync clients status:"
-        local available_clients=($(detect_sync_clients))
-        local sync_method=$(get_sync_method)
+        available_clients=($(detect_sync_clients))
+        sync_method=$(get_sync_method)
 
         hedgii_log "INFO" "Available clients: ${available_clients[*]}"
         hedgii_log "INFO" "Current method: $sync_method"
@@ -1081,7 +1108,7 @@ case "${1:-curl}" in
         for client in "${available_clients[@]}"; do
             case "$client" in
                 "rclone")
-                    local remotes=$(rclone listremotes 2>/dev/null | wc -l)
+                    remotes=$(rclone listremotes 2>/dev/null | wc -l)
                     hedgii_log "INFO" "rclone: $remotes remotes configured"
                     ;;
                 "onedrive")

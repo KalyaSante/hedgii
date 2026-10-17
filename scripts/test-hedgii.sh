@@ -1,231 +1,130 @@
 #!/bin/bash
 
 # 🦔 Hedgii Test Script
-# Quick validation that everything works correctly
+# Local integration tests for backup and restore
 
 set -euo pipefail
 
-# Colors for kawaii output
 PINK='\033[1;35m'
 GREEN='\033[1;32m'
-YELLOW='\033[1;33m'
 RED='\033[1;31m'
 NC='\033[0m'
 
-# Test logging function
 test_log() {
     local level="$1"
     shift
-    local message="$*"
-    
     case "$level" in
-        "INFO")   echo -e "${GREEN}🦔 [TEST]${NC} $message" ;;
-        "WARN")   echo -e "${YELLOW}⚠️  [TEST]${NC} $message" ;;
-        "ERROR")  echo -e "${RED}💥 [TEST]${NC} $message" ;;
-        "KAWAII") echo -e "${PINK}✨ [TEST]${NC} $message" ;;
+        "INFO")   echo -e "${GREEN}🦔 [TEST]${NC} $*" ;;
+        "ERROR")  echo -e "${RED}💥 [TEST]${NC} $*" ;;
+        "KAWAII") echo -e "${PINK}✨ [TEST]${NC} $*" ;;
     esac
 }
 
-# Show welcome
-show_welcome() {
-    clear
-    echo -e "${PINK}"
-    cat << 'EOF'
-    🦔 =============================================== 🦔
-    
-         🧪 Hedgii Test Suite 🧪
-         
-         Testing your kawaii backup guardian
-         to ensure everything works perfectly! (≧◡≦)
-         
-    🦔 =============================================== 🦔
+for dependency in diff gpg jq rclone rsync tar unzip zip; do
+    if ! command -v "$dependency" >/dev/null 2>&1; then
+        test_log "ERROR" "Missing dependency: $dependency"
+        exit 1
+    fi
+done
+
+REPOSITORY_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+TEMP_DIR=$(mktemp -d)
+trap 'rm -rf "$TEMP_DIR"' EXIT
+
+SOURCE_ONE="$TEMP_DIR/source-one"
+SOURCE_TWO="$TEMP_DIR/source-two"
+mkdir -p "$SOURCE_ONE/nested" "$SOURCE_TWO" "$TEMP_DIR/remote"
+printf 'first source data\n' > "$SOURCE_ONE/nested/first.txt"
+printf 'second source data\n' > "$SOURCE_TWO/second.txt"
+printf 'excluded data\n' > "$SOURCE_ONE/ignored.skipme"
+printf 'hedgii-test-passphrase\n' > "$TEMP_DIR/passphrase"
+chmod 600 "$TEMP_DIR/passphrase"
+
+export RCLONE_CONFIG="$TEMP_DIR/rclone.conf"
+cat > "$RCLONE_CONFIG" <<EOF
+[test]
+type = local
 EOF
-    echo -e "${NC}"
-    echo ""
+
+export HEDGII_CONFIG_FILE="$TEMP_DIR/config.json"
+export HEDGII_LOG_FILE="$TEMP_DIR/hedgii.log"
+
+write_config() {
+    local format="$1"
+    local remote="$2"
+    jq -n \
+        --arg source_one "$SOURCE_ONE" \
+        --arg source_two "$SOURCE_TWO" \
+        --arg staging "$TEMP_DIR/staging" \
+        --arg backup "$TEMP_DIR/backups" \
+        --arg passphrase "$TEMP_DIR/passphrase" \
+        --arg format "$format" \
+        --arg remote "$remote" \
+        '{
+          backup_sources: [
+            {source: $source_one, destination: "first", description: "First source"},
+            {source: $source_two, destination: "second", description: "Second source"}
+          ],
+          custom_commands: [
+            {command: "printf custom-data", description: "Test custom command", output_file: "custom/output.txt", working_dir: "/tmp", timeout: 10, continue_on_error: false}
+          ],
+          settings: {
+            staging_dir: $staging,
+            backup_dir: $backup,
+            encrypt_passphrase_file: $passphrase,
+            compression_format: $format,
+            sync_method: "rclone",
+            rclone_remote: $remote,
+            local_keep_last: 2
+          },
+          exclusions: ["*.skipme"]
+        }' > "$HEDGII_CONFIG_FILE"
 }
 
-# Test script syntax
-test_script_syntax() {
-    test_log "INFO" "Testing script syntax..."
-    
-    local scripts=("hedgii.sh" "install.sh" "uninstall.sh" "scripts/hedgii-doctor.sh")
-    local syntax_errors=0
-    
-    for script in "${scripts[@]}"; do
-        if [[ -f "$script" ]]; then
-            test_log "INFO" "Checking $script..."
-            if bash -n "$script" 2>/dev/null; then
-                test_log "INFO" "  ✓ Syntax OK"
-            else
-                test_log "ERROR" "  ✗ Syntax error in $script"
-                ((syntax_errors++))
-            fi
-        else
-            test_log "WARN" "  Script $script not found"
-        fi
-    done
-    
-    echo ""
-    return $syntax_errors
+assert_restored() {
+    local output_dir="$1"
+    diff -r --exclude='*.skipme' "$SOURCE_ONE" "$output_dir/first"
+    diff -r "$SOURCE_TWO" "$output_dir/second"
+    [[ ! -e "$output_dir/first/ignored.skipme" ]]
+    [[ "$(cat "$output_dir/custom/output.txt")" == "custom-data" ]]
 }
 
-# Test configuration validation
-test_config_validation() {
-    test_log "INFO" "Testing configuration validation..."
-    
-    local config_file="config/hedgii_config.json.example"
-    
-    if [[ -f "$config_file" ]]; then
-        if jq empty "$config_file" 2>/dev/null; then
-            test_log "INFO" "✓ Configuration JSON is valid"
-            
-            # Test specific fields
-            local custom_count=$(jq '.custom_commands | length' "$config_file" 2>/dev/null)
-            local source_count=$(jq '.backup_sources | length' "$config_file" 2>/dev/null)
-            local settings_present=$(jq 'has("settings")' "$config_file" 2>/dev/null)
-            
-            test_log "INFO" "  Custom commands: $custom_count"
-            test_log "INFO" "  Backup sources: $source_count"
-            test_log "INFO" "  Settings present: $settings_present"
-            
-            return 0
-        else
-            test_log "ERROR" "✗ Configuration JSON is invalid"
-            return 1
-        fi
-    else
-        test_log "ERROR" "Configuration example file not found"
-        return 1
-    fi
-    
-    echo ""
+run_backup_and_restore() {
+    local format="$1"
+    local extension="$2"
+    local name="$3"
+    local output_dir="$TEMP_DIR/restore-$name"
+    write_config "$format" "test:$TEMP_DIR/remote/"
+    test_log "INFO" "Testing $format backup and restore..."
+    (cd "$REPOSITORY_ROOT" && bash ./hedgii.sh curl)
+
+    local archive
+    archive=$(find "$TEMP_DIR/backups" -maxdepth 1 -type f -name "hedgii_backup_*.$extension.gpg" | head -n 1)
+    [[ -n "$archive" ]]
+    bash "$REPOSITORY_ROOT/scripts/decrypt.sh" "$archive" "$output_dir"
+    assert_restored "$output_dir"
 }
 
-# Test dependencies check
-test_dependencies() {
-    test_log "INFO" "Testing dependency detection..."
-    
-    local deps=("jq" "gpg" "rsync" "bash")
-    local available=0
-    
-    for dep in "${deps[@]}"; do
-        if command -v "$dep" >/dev/null 2>&1; then
-            test_log "INFO" "  ✓ $dep available"
-            ((available++))
-        else
-            test_log "WARN" "  ⚠ $dep not available"
-        fi
-    done
-    
-    test_log "INFO" "Dependencies available: $available/${#deps[@]}"
-    echo ""
-    
-    return 0
-}
+test_log "KAWAII" "🦔 Running local backup integration tests..."
+run_backup_and_restore "zip" "zip" "zip"
+run_backup_and_restore "tar.gz" "tar.gz" "tar"
 
-# Test file structure
-test_file_structure() {
-    test_log "INFO" "Testing file structure..."
-    
-    local required_files=(
-        "hedgii.sh"
-        "install.sh"
-        "uninstall.sh"
-        "README.md"
-        "LICENSE"
-        ".gitignore"
-        "config/hedgii_config.json.example"
-        "scripts/hedgii-doctor.sh"
-    )
-    
-    local missing_files=0
-    
-    for file in "${required_files[@]}"; do
-        if [[ -f "$file" ]]; then
-            test_log "INFO" "  ✓ $file present"
-        else
-            test_log "WARN" "  ⚠ $file missing"
-            ((missing_files++))
-        fi
-    done
-    
-    echo ""
-    return $missing_files
-}
+test_log "INFO" "Checking failed uploads return code 4..."
+write_config "tar.gz" "missing:$TEMP_DIR/remote/"
+set +e
+(cd "$REPOSITORY_ROOT" && bash ./hedgii.sh curl)
+upload_status=$?
+set -e
+[[ "$upload_status" -eq 4 ]]
 
-# Test hedgii commands (if installed)
-test_hedgii_commands() {
-    test_log "INFO" "Testing Hedgii commands..."
-    
-    if command -v hedgii >/dev/null 2>&1; then
-        test_log "INFO" "Hedgii is installed, testing commands..."
-        
-        # Test help
-        if hedgii 2>/dev/null | grep -q "Hedgii Commands"; then
-            test_log "INFO" "  ✓ Help command works"
-        else
-            test_log "WARN" "  ⚠ Help command failed"
-        fi
-        
-        # Test config validation
-        if hedgii validate-config >/dev/null 2>&1; then
-            test_log "INFO" "  ✓ Config validation works"
-        else
-            test_log "WARN" "  ⚠ Config validation failed"
-        fi
-        
-    else
-        test_log "WARN" "Hedgii not installed, skipping command tests"
-        test_log "INFO" "Run './install.sh' to install and test commands"
-    fi
-    
-    echo ""
-}
+test_log "INFO" "Checking local backup retention..."
+write_config "tar.gz" "test:$TEMP_DIR/remote/"
+for run in 1 2 3 4 5; do
+    test_log "INFO" "Retention run $run/5"
+    sleep 1
+    (cd "$REPOSITORY_ROOT" && bash ./hedgii.sh curl)
+done
+archive_count=$(find "$TEMP_DIR/backups" -maxdepth 1 -type f -name 'hedgii_backup_*.gpg' | wc -l)
+[[ "$archive_count" -eq 2 ]]
 
-# Show test summary
-show_summary() {
-    local total_errors=$1
-    
-    test_log "KAWAII" "Test Suite Summary"
-    
-    if [[ $total_errors -eq 0 ]]; then
-        test_log "INFO" "🎉 All tests passed! Hedgii is ready to deploy!"
-        echo ""
-        echo "✨ Next steps:"
-        echo "   • Run: sudo ./install.sh"
-        echo "   • Configure rclone: rclone config"
-        echo "   • Test backup: hedgii curl"
-    else
-        test_log "WARN" "Found $total_errors issues that need attention"
-        echo ""
-        echo "🔧 Please fix the issues above before deployment"
-    fi
-    
-    echo ""
-    test_log "KAWAII" "Remember: Tested hedgehogs are happy hedgehogs! 🦔💖"
-}
-
-# Main test function
-main() {
-    show_welcome
-    
-    local total_errors=0
-    
-    test_script_syntax
-    total_errors=$((total_errors + $?))
-    
-    test_config_validation
-    total_errors=$((total_errors + $?))
-    
-    test_dependencies
-    
-    test_file_structure
-    total_errors=$((total_errors + $?))
-    
-    test_hedgii_commands
-    
-    show_summary $total_errors
-}
-
-# Run tests
-main "$@"
+test_log "KAWAII" "🎉 All local integration tests passed!"
