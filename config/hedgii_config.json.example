@@ -127,6 +127,12 @@
     "onedrive_backup_dir": "hedgii-backups",
     "onedrive_config_dir": "/etc/hedgii/onedrive"
   },
+  "notifications": {
+    "on": ["failure", "warning"],
+    "discord_webhook": "",
+    "telegram": { "bot_token_file": "/etc/hedgii/telegram_token", "chat_id": "" },
+    "ping_url": ""
+  },
   "exclusions": [
     "*.tmp",
     "*.log.old",
