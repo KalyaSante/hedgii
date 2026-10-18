@@ -759,6 +759,328 @@ hedgii_curl() {
     fi
 }
 
+# Shared lock so that curl and verify never run at the same time
+acquire_lock() {
+    local lock_file="${HEDGII_LOCK_FILE:-/var/lock/hedgii.lock}"
+    exec 9>"$lock_file" || {
+        hedgii_log "ERROR" "Cannot open lock file: $lock_file"
+        exit 1
+    }
+    if ! flock -n 9; then
+        hedgii_log "ERROR" "Another Hedgii operation (curl/verify) is already running"
+        exit 1
+    fi
+}
+
+VERIFY_TMP=""
+VERIFY_CONTAINERS=()
+
+# Always remove the temporary directory and throwaway containers
+verify_cleanup() {
+    local c
+    for c in "${VERIFY_CONTAINERS[@]:-}"; do
+        [[ -n "$c" ]] && docker rm -f "$c" >/dev/null 2>&1 || true
+    done
+    VERIFY_CONTAINERS=()
+    if [[ -n "$VERIFY_TMP" && -d "$VERIFY_TMP" ]]; then
+        rm -rf "$VERIFY_TMP"
+    fi
+    VERIFY_TMP=""
+}
+
+# Send the verification result to the log and the optional notify command
+verify_notify() {
+    local status="$1" message="$2"
+    local level="INFO"
+    [[ "$status" == "FAILED" ]] && level="ERROR"
+    hedgii_log "$level" "Verify $status: $message"
+
+    local notify_cmd
+    notify_cmd=$(jq -r '.verify.notify_command // empty' "$CONFIG_FILE" 2>/dev/null || true)
+    if [[ -n "$notify_cmd" ]]; then
+        HEDGII_VERIFY_STATUS="$status" HEDGII_VERIFY_MESSAGE="$message" \
+            bash -c "$notify_cmd" >/dev/null 2>&1 || hedgii_log "WARN" "Notify command failed"
+    fi
+}
+
+# Fetch an archive from the remote into $1; prints the local file path
+verify_fetch_remote() {
+    local dest_dir="$1" archive="$2"
+    local sync_method
+    sync_method=$(get_sync_method) || return 1
+
+    case "$sync_method" in
+        "rclone")
+            command -v rclone >/dev/null 2>&1 || { hedgii_log "ERROR" "rclone not installed" >&2; return 1; }
+            local remote
+            remote=$(jq -r '.settings.rclone_remote // "onedrive:hedgii-backups/"' "$CONFIG_FILE")
+            [[ "$remote" == */ || "$remote" == *: ]] || remote="$remote/"
+            if [[ -z "$archive" ]]; then
+                archive=$(rclone lsf --files-only "$remote" 2>/dev/null | grep -E '^hedgii_backup_.*\.gpg$' | sort | tail -n1 || true)
+            fi
+            [[ -n "$archive" ]] || { hedgii_log "ERROR" "No archive found on remote" >&2; return 1; }
+            hedgii_log "INFO" "Downloading $archive from $remote" >&2
+            rclone copyto "${remote}${archive}" "$dest_dir/$archive" >&2 || return 1
+            echo "$dest_dir/$archive"
+            ;;
+        "onedrive")
+            command -v onedrive >/dev/null 2>&1 || { hedgii_log "ERROR" "OneDrive client not installed" >&2; return 1; }
+            local conf_dir="/etc/hedgii/onedrive"
+            local subdir
+            subdir=$(jq -r '.settings.onedrive_backup_dir // "hedgii-backups"' "$CONFIG_FILE")
+            hedgii_log "INFO" "Downloading from OneDrive ($subdir)..." >&2
+            timeout 900 onedrive --confdir="$conf_dir" --sync --download-only \
+                --single-directory="$subdir" >&2 || return 1
+            local sync_dir="$conf_dir/sync/$subdir"
+            if [[ -z "$archive" ]]; then
+                archive=$(ls -1 "$sync_dir" 2>/dev/null | grep -E '^hedgii_backup_.*\.gpg$' | sort | tail -n1 || true)
+            fi
+            [[ -n "$archive" && -f "$sync_dir/$archive" ]] || { hedgii_log "ERROR" "No archive found on OneDrive" >&2; return 1; }
+            cp "$sync_dir/$archive" "$dest_dir/$archive" || return 1
+            echo "$dest_dir/$archive"
+            ;;
+        *)
+            hedgii_log "ERROR" "Unknown sync method: $sync_method" >&2
+            return 1
+            ;;
+    esac
+}
+
+# Locate an archive in the local backup directory; prints its path
+verify_fetch_local() {
+    local archive="$1"
+    local backup_dir
+    backup_dir=$(jq -r '.settings.backup_dir // "/var/backups/hedgii"' "$CONFIG_FILE")
+
+    if [[ -n "$archive" ]]; then
+        if [[ -f "$archive" ]]; then
+            echo "$archive"
+        elif [[ -f "$backup_dir/$(basename "$archive")" ]]; then
+            echo "$backup_dir/$(basename "$archive")"
+        else
+            hedgii_log "ERROR" "Archive not found: $archive" >&2
+            return 1
+        fi
+        return 0
+    fi
+
+    local latest
+    latest=$(ls -1 "$backup_dir"/hedgii_backup_*.gpg 2>/dev/null | sort | tail -n1 || true)
+    [[ -n "$latest" ]] || { hedgii_log "ERROR" "No local archive found in $backup_dir" >&2; return 1; }
+    echo "$latest"
+}
+
+# Run a throwaway database container and load one SQL dump into it
+verify_sql_dump() {
+    local dump="$1" index="$2"
+    local engine="" header
+    header=$(head -c 4096 "$dump" 2>/dev/null || true)
+
+    if grep -qi "PostgreSQL database" <<<"$header"; then
+        engine="postgres"
+    elif grep -qiE "MariaDB dump|MySQL dump" <<<"$header"; then
+        engine="mariadb"
+    else
+        hedgii_log "WARN" "Unknown SQL dump type, skipping: $(basename "$dump")"
+        return 0
+    fi
+
+    local name="hedgii-verify-$$-$index"
+    local dbsecret
+    dbsecret=$(head -c 24 /dev/urandom | base64 | tr -dc 'A-Za-z0-9')
+    VERIFY_CONTAINERS+=("$name")
+
+    hedgii_log "INFO" "Loading $(basename "$dump") into a throwaway $engine container..."
+    if [[ "$engine" == "mariadb" ]]; then
+        docker run -d --name "$name" -e MARIADB_ROOT_PASSWORD="$dbsecret" mariadb:lts >/dev/null || return 1
+        local i ready=0
+        for i in $(seq 1 60); do
+            if docker exec -e MYSQL_PWD="$dbsecret" "$name" mariadb -uroot -e "SELECT 1" >/dev/null 2>&1; then ready=1; break; fi
+            sleep 2
+        done
+        [[ $ready -eq 1 ]] || { hedgii_log "ERROR" "MariaDB container did not become ready"; return 1; }
+        docker exec -i -e MYSQL_PWD="$dbsecret" "$name" mariadb -uroot < "$dump" >/dev/null || return 1
+        docker exec -e MYSQL_PWD="$dbsecret" "$name" mariadb -uroot -e "SELECT 1" >/dev/null || return 1
+    else
+        docker run -d --name "$name" -e POSTGRES_PASSWORD="$dbsecret" postgres:16 >/dev/null || return 1
+        local i ready=0
+        for i in $(seq 1 60); do
+            if docker exec "$name" psql -U postgres -tAc "SELECT 1" >/dev/null 2>&1; then ready=1; break; fi
+            sleep 2
+        done
+        [[ $ready -eq 1 ]] || { hedgii_log "ERROR" "PostgreSQL container did not become ready"; return 1; }
+        docker exec -i "$name" psql -U postgres -v ON_ERROR_STOP=1 < "$dump" >/dev/null || return 1
+        docker exec "$name" psql -U postgres -tAc "SELECT 1" >/dev/null || return 1
+    fi
+
+    docker rm -f "$name" >/dev/null 2>&1 || true
+    return 0
+}
+
+# Core verification; returns non-zero (message in VERIFY_MESSAGE) on failure
+VERIFY_MESSAGE=""
+verify_archive() {
+    local mode="$1" archive_name="$2"
+    local file
+
+    VERIFY_TMP=$(mktemp -d /tmp/hedgii_verify.XXXXXX) || { VERIFY_MESSAGE="Cannot create temporary directory"; return 1; }
+    chmod 700 "$VERIFY_TMP"
+
+    if [[ "$mode" == "remote" ]]; then
+        file=$(verify_fetch_remote "$VERIFY_TMP" "$archive_name") || { VERIFY_MESSAGE="Could not fetch archive from remote"; return 1; }
+    else
+        file=$(verify_fetch_local "$archive_name") || { VERIFY_MESSAGE="Could not find local archive"; return 1; }
+    fi
+
+    local base
+    base=$(basename "$file")
+    hedgii_log "INFO" "Verifying archive: $base"
+
+    local passphrase_file
+    passphrase_file=$(jq -r '.settings.encrypt_passphrase_file' "$CONFIG_FILE")
+    if [[ -z "$passphrase_file" || ! -f "$passphrase_file" ]]; then
+        VERIFY_MESSAGE="Passphrase file not found"
+        return 1
+    fi
+
+    local kind
+    case "$base" in
+        *.zip.gpg) kind="zip" ;;
+        *.tar.gz.gpg) kind="tar" ;;
+        *) VERIFY_MESSAGE="Unsupported archive name: $base"; return 1 ;;
+    esac
+
+    local listing="$VERIFY_TMP/listing.txt" report="$VERIFY_TMP/report.txt"
+    local zip_plain="$VERIFY_TMP/archive.zip"
+    local gpg_cmd=(gpg --batch --yes --quiet --passphrase-file "$passphrase_file" --decrypt)
+
+    if [[ "$kind" == "tar" ]]; then
+        # Streamed: nothing is written to disk
+        if ! "${gpg_cmd[@]}" "$file" 2>/dev/null | tar -tzf - > "$listing" 2>/dev/null; then
+            VERIFY_MESSAGE="Archive is corrupted, truncated or cannot be decrypted: $base"
+            return 1
+        fi
+        "${gpg_cmd[@]}" "$file" 2>/dev/null | tar -xzOf - ./hedgii_backup_report.txt > "$report" 2>/dev/null || true
+    else
+        command -v unzip >/dev/null 2>&1 || { VERIFY_MESSAGE="Missing dependency: unzip"; return 1; }
+        if ! "${gpg_cmd[@]}" --output "$zip_plain" "$file" 2>/dev/null; then
+            VERIFY_MESSAGE="Archive cannot be decrypted: $base"
+            return 1
+        fi
+        if ! unzip -tq "$zip_plain" >/dev/null 2>&1; then
+            VERIFY_MESSAGE="ZIP archive test failed: $base"
+            return 1
+        fi
+        unzip -Z1 "$zip_plain" > "$listing" 2>/dev/null || { VERIFY_MESSAGE="Cannot list ZIP archive: $base"; return 1; }
+        unzip -p "$zip_plain" hedgii_backup_report.txt > "$report" 2>/dev/null || true
+    fi
+
+    # Normalize listing: relative paths, files only
+    sed -e 's#^\./##' -e '/\/$/d' -e '/^$/d' "$listing" > "$listing.norm"
+    local actual_count
+    actual_count=$(wc -l < "$listing.norm" | tr -d ' ')
+
+    if [[ ! -s "$report" ]]; then
+        VERIFY_MESSAGE="hedgii_backup_report.txt missing from archive: $base"
+        return 1
+    fi
+
+    local expected_count
+    expected_count=$(sed -n 's/^Total files: *\([0-9][0-9]*\).*/\1/p' "$report" | head -n1)
+    if [[ -z "$expected_count" ]]; then
+        VERIFY_MESSAGE="Cannot read file count from backup report"
+        return 1
+    fi
+
+    if [[ "$actual_count" -ne "$expected_count" ]]; then
+        if [[ "$kind" == "zip" && "$actual_count" -lt "$expected_count" ]]; then
+            # ZIP creation excludes some patterns (*.tmp, .git/*, ...)
+            hedgii_log "WARN" "ZIP has $actual_count files, report lists $expected_count (exclusions may apply)"
+        else
+            VERIFY_MESSAGE="File count mismatch: archive has $actual_count, report says $expected_count"
+            return 1
+        fi
+    fi
+
+    # Every file listed in the report must be present in the archive
+    local staging_dir missing=0 path
+    staging_dir=$(jq -r '.settings.staging_dir // "/tmp/hedgii_staging"' "$CONFIG_FILE")
+    staging_dir="${staging_dir%/}"
+    while IFS= read -r path; do
+        [[ -n "$path" ]] || continue
+        if ! grep -Fxq -- "$path" "$listing.norm"; then
+            hedgii_log "ERROR" "Listed in report but missing from archive: $path"
+            missing=$((missing + 1))
+        fi
+    done < <(grep -E '^-' "$report" | grep -F " $staging_dir/" | sed -e "s#^.* $staging_dir/##" | grep -v '^hedgii_backup_report.txt$' || true)
+    if [[ $missing -gt 0 ]]; then
+        VERIFY_MESSAGE="$missing file(s) listed in report are missing from archive"
+        return 1
+    fi
+
+    # Optional: load SQL dumps into throwaway containers
+    local sql_check
+    sql_check=$(jq -r '.verify.sql_check // false' "$CONFIG_FILE" 2>/dev/null || echo false)
+    if [[ "$sql_check" == "true" ]]; then
+        command -v docker >/dev/null 2>&1 || { VERIFY_MESSAGE="verify.sql_check requires docker"; return 1; }
+        local sql_dir="$VERIFY_TMP/sql"
+        mkdir -m 700 "$sql_dir"
+        if [[ "$kind" == "tar" ]]; then
+            "${gpg_cmd[@]}" "$file" 2>/dev/null | tar -xzf - -C "$sql_dir" --wildcards '*.sql' 2>/dev/null || true
+        else
+            unzip -qq -o "$zip_plain" '*.sql' -d "$sql_dir" >/dev/null 2>&1 || true
+        fi
+        local dump idx=0
+        while IFS= read -r dump; do
+            idx=$((idx + 1))
+            if ! verify_sql_dump "$dump" "$idx"; then
+                VERIFY_MESSAGE="SQL check failed for $(basename "$dump")"
+                return 1
+            fi
+        done < <(find "$sql_dir" -type f -name '*.sql' | sort)
+    fi
+
+    VERIFY_MESSAGE="$base is restorable ($actual_count files)"
+    return 0
+}
+
+hedgii_verify() {
+    local mode="remote" archive_name=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --remote) mode="remote" ;;
+            --local) mode="local" ;;
+            --archive)
+                [[ $# -ge 2 ]] || { hedgii_log "ERROR" "--archive needs a name"; exit 1; }
+                archive_name="$2"
+                shift
+                ;;
+            *) hedgii_log "ERROR" "Unknown verify option: $1"; exit 1 ;;
+        esac
+        shift
+    done
+    if [[ "$mode" == "remote" && "$archive_name" == */* ]]; then
+        hedgii_log "ERROR" "Remote archive name must not contain '/'"
+        exit 1
+    fi
+
+    hedgii_log "KAWAII" "🦔 Hedgii is checking that your backup can be restored..."
+    check_dependencies
+    acquire_lock
+
+    trap verify_cleanup EXIT
+    local rc=0
+    verify_archive "$mode" "$archive_name" || rc=$?
+    verify_cleanup
+
+    if [[ $rc -eq 0 ]]; then
+        verify_notify "OK" "$VERIFY_MESSAGE"
+    else
+        verify_notify "FAILED" "$VERIFY_MESSAGE"
+        exit 1
+    fi
+}
+
 # Interactive sync method selection
 select_sync_method() {
     hedgii_log "KAWAII" "🤔 Which sync method would you like to use?"
@@ -1031,7 +1353,12 @@ hedgii_change_passphrase() {
 # Command handling with enhanced multi-sync support
 case "${1:-curl}" in
     "curl")
+        acquire_lock
         hedgii_curl
+        ;;
+    "verify")
+        shift
+        hedgii_verify "$@"
         ;;
     "peek")
         hedgii_log "INFO" "Hedgii status: Ready to protect! 🦔"
@@ -1106,6 +1433,7 @@ case "${1:-curl}" in
     *)
         echo "🦔 Hedgii Commands:"
         echo "  curl              - Backup your data with enhanced sync (default)"
+        echo "  verify            - Prove a backup is restorable [--remote|--local] [--archive <name>]"
         echo "  peek              - Check backup status"
         echo "  guard             - View protection status"
         echo "  test-commands     - Test custom commands without full backup"

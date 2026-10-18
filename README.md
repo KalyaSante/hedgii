@@ -584,6 +584,9 @@ Hedgii comes with several kawaii commands to manage your backups:
 # 🦔 Main backup command
 sudo hedgii curl
 
+# 🔍 Prove the latest backup is restorable (remote by default)
+sudo hedgii verify [--remote|--local] [--archive <name>]
+
 # 👀 Check backup status
 sudo hedgii peek
 
@@ -605,6 +608,21 @@ sudo hedgii change-passphrase
 # 📦 Show current compression format information
 sudo hedgii compression-info
 ```
+
+### **🔍 Verify**
+
+`hedgii verify` downloads the latest archive (rclone/OneDrive, or `--local`) into a private `0700` temp directory, decrypts and tests it, and compares its file list/count with the embedded `hedgii_backup_report.txt`. The temp directory is always removed, the result is logged, and it shares a lock with `curl`. The installer can schedule it weekly via cron.
+
+Optional config:
+
+```json
+"verify": {
+  "sql_check": false,
+  "notify_command": "mail -s \"Hedgii verify $HEDGII_VERIFY_STATUS\" admin@example.com <<< \"$HEDGII_VERIFY_MESSAGE\""
+}
+```
+
+With `sql_check: true` (requires Docker), each `.sql` dump is loaded into a throwaway `mariadb`/`postgres` container, which is removed afterwards.
 
 ### **🔄 Sync Commands**
 
