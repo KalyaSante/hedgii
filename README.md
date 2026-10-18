@@ -61,6 +61,8 @@ hedgii setup-sync
     
     // rclone settings
     "rclone_remote": "onedrive:hedgii-backups/",
+    "rclone_config": "/etc/hedgii/rclone.conf",  // used via --config for every rclone call
+    "rclone_timeout": 60,                        // seconds, for connection/write tests
     
     // OneDrive client settings
     "onedrive_backup_dir": "hedgii-backups",
@@ -68,6 +70,32 @@ hedgii setup-sync
   }
 }
 ```
+
+### **☁️ rclone Setup (headless servers)**
+
+Hedgii runs as root from cron and always passes `--config /etc/hedgii/rclone.conf`
+(`settings.rclone_config`, `root:root`, `chmod 600`), so cron and `sudo hedgii test-sync`
+use the same config. If only `/root/.config/rclone/rclone.conf` exists, Hedgii offers to copy it.
+
+```bash
+sudo hedgii setup-rclone   # runs rclone config, then a write/read/delete probe
+sudo hedgii test-sync      # re-test the configured remote (writes .hedgii-probe-<date>)
+```
+
+On a server without a browser, answer `n` to **"Use auto config?"**, then on a machine with a
+browser run `rclone authorize "drive"` (or `"onedrive"`) and paste the token back.
+
+**Google Drive**: create your own OAuth client (Google Cloud Console → APIs & Services →
+enable Drive API → OAuth consent screen → Credentials → OAuth client ID, type *Desktop app*)
+and give `client_id`/`client_secret` to `rclone config`. The shared rclone client is rate-limited.
+Move the consent screen from *Testing* to *In production*: apps in Testing mode have tokens that
+expire every 7 days and backups silently stop. The "app not verified" warning during
+authorization is expected for your own app.
+
+**OneDrive**: using your own `client_id` (Azure app registration) is recommended.
+
+If a token expires (`invalid_grant`, `token expired`, `401`), Hedgii prints:
+`rclone config reconnect <remote>: --config /etc/hedgii/rclone.conf`.
 
 ---
 
