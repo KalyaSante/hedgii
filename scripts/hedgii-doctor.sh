@@ -73,12 +73,12 @@ check_hedgii_installation() {
         else
             doctor_log "FAIL" "Script not executable"
             doctor_log "FIX" "Run: sudo chmod +x /usr/local/bin/hedgii"
-            ((issues++))
+            issues=$((issues + 1))
         fi
     else
         doctor_log "FAIL" "Main script not found"
         doctor_log "FIX" "Run the installer: sudo ./install.sh"
-        ((issues++))
+        issues=$((issues + 1))
     fi
     
     # Check symlink
@@ -103,12 +103,12 @@ check_hedgii_installation() {
             else
                 doctor_log "FAIL" "Configuration JSON is invalid"
                 doctor_log "FIX" "Check syntax: jq . /etc/hedgii/hedgii_config.json"
-                ((issues++))
+                issues=$((issues + 1))
             fi
         else
             doctor_log "FAIL" "Configuration file missing"
             doctor_log "FIX" "Copy example config or run installer"
-            ((issues++))
+            issues=$((issues + 1))
         fi
         
         # Check GPG passphrase
@@ -125,12 +125,12 @@ check_hedgii_installation() {
         else
             doctor_log "FAIL" "GPG passphrase file missing"
             doctor_log "FIX" "Create passphrase file or run installer"
-            ((issues++))
+            issues=$((issues + 1))
         fi
     else
         doctor_log "FAIL" "Configuration directory missing"
         doctor_log "FIX" "Run: sudo mkdir -p /etc/hedgii"
-        ((issues++))
+        issues=$((issues + 1))
     fi
     
     echo ""
@@ -231,7 +231,7 @@ check_cron_jobs() {
     else
         doctor_log "FAIL" "Cron job file missing"
         doctor_log "FIX" "Re-run installer or create manually"
-        ((cron_issues++))
+        cron_issues=$((cron_issues + 1))
     fi
     
     # Check cron service
@@ -240,7 +240,7 @@ check_cron_jobs() {
     else
         doctor_log "FAIL" "Cron service not running"
         doctor_log "FIX" "Start cron: sudo systemctl start cron"
-        ((cron_issues++))
+        cron_issues=$((cron_issues + 1))
     fi
     
     echo ""
@@ -302,7 +302,7 @@ test_sync_clients() {
                 else
                     doctor_log "WARN" "rclone connection failed or timed out"
                     doctor_log "FIX" "Check: rclone config reconnect $first_remote"
-                    ((sync_issues++))
+                    sync_issues=$((sync_issues + 1))
                 fi
             fi
         else
@@ -343,7 +343,7 @@ test_sync_clients() {
             else
                 doctor_log "WARN" "OneDrive connection failed"
                 doctor_log "FIX" "Re-authenticate: sudo onedrive --confdir='$onedrive_config_dir' --auth-files"
-                ((sync_issues++))
+                sync_issues=$((sync_issues + 1))
             fi
         else
             doctor_log "WARN" "OneDrive client not configured"
@@ -364,7 +364,7 @@ test_sync_clients() {
             if [[ ! " ${available_clients[*]} " =~ " $sync_method " ]]; then
                 doctor_log "FAIL" "Configured sync method '$sync_method' not available"
                 doctor_log "FIX" "Change sync method: hedgii setup-sync"
-                ((sync_issues++))
+                sync_issues=$((sync_issues + 1))
             fi
         fi
     fi
@@ -373,7 +373,7 @@ test_sync_clients() {
     if [[ ${#available_clients[@]} -eq 0 ]]; then
         doctor_log "FAIL" "No sync clients available"
         doctor_log "FIX" "Install at least one: rclone or OneDrive client"
-        ((sync_issues++))
+        sync_issues=$((sync_issues + 1))
     else
         doctor_log "INFO" "Available sync clients: ${available_clients[*]}"
     fi

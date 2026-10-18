@@ -564,10 +564,10 @@ execute_custom_commands() {
         # Execute command with timeout
         if execute_command_with_timeout "$command" "$working_dir" "$timeout" "$full_output_path"; then
             hedgii_log "INFO" "  ✓ Command successful"
-            ((success_count++))
+            success_count=$((success_count + 1))
         else
             hedgii_log "ERROR" "  ✗ Command failed"
-            ((failed_count++))
+            failed_count=$((failed_count + 1))
 
             if [[ "$continue_on_error" == "false" ]]; then
                 hedgii_log "ERROR" "Stopping execution due to failed command"
@@ -604,7 +604,7 @@ process_sources_with_commands() {
         local description=$(jq -r ".backup_sources[$i].description" "$CONFIG_FILE")
 
         if copy_resource "$source" "$destination" "$description" "$staging_dir"; then
-            ((success_count++))
+            success_count=$((success_count + 1))
         fi
     done
 
@@ -780,7 +780,7 @@ select_sync_method() {
             "rclone")   echo "  $option_number) rclone (supports multiple clouds)" ;;
             "onedrive") echo "  $option_number) OneDrive client (OneDrive optimized)" ;;
         esac
-        ((option_number++))
+        option_number=$((option_number + 1))
     done
 
     echo ""
