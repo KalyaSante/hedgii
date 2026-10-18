@@ -129,15 +129,19 @@ Hedgii isn't just another backup script - it's your kawaii guardian that protect
 
 ## 🚀 Quick Start
 
-### **One-liner Installation** (Coming Soon!)
+### **Installer**
 ```bash
-curl -fsSL https://raw.githubusercontent.com/damienmarill/hedgii/main/install.sh | sudo bash
+git clone https://github.com/KalyaSante/hedgii.git
+cd hedgii
+sudo ./install.sh   # dependencies, config, GPG passphrase, cron (backup + weekly verify)
 ```
+
+`install.sh` copies files from the checkout, so it can't be piped from `curl`.
 
 ### **Manual Installation**
 ```bash
 # Clone the kawaii repository
-git clone https://github.com/damienmarill/hedgii.git
+git clone https://github.com/KalyaSante/hedgii.git
 cd hedgii
 
 # Make hedgii executable
@@ -153,8 +157,8 @@ sudo cp config/hedgii_config.json.example /etc/hedgii/hedgii_config.json
 echo "your_super_secret_passphrase" | sudo tee /etc/hedgii/gpg_passphrase
 sudo chmod 600 /etc/hedgii/gpg_passphrase
 
-# Configure rclone for your cloud storage
-rclone config
+# Configure rclone for your cloud storage (writes /etc/hedgii/rclone.conf)
+sudo ./hedgii.sh setup-rclone
 ```
 
 ### **First Backup**
@@ -870,6 +874,26 @@ Validate with `hedgii test-notify`.
 A successful run is reported as `warning` when it logged an `[ERROR]` (a non-blocking command
 failed, for instance) or when an older archive is still waiting to be uploaded.
 
+## ♻️ Restoring a Backup
+
+Archives are `hedgii_backup_YYYYMMDD_HHMMSS.{zip|tar.gz}.gpg`, in `backup_dir` and on the remote.
+`scripts/decrypt.sh` detects the format (from the name, or from the content).
+
+**On the server (Hedgii config present)**: the passphrase file comes from the config.
+```bash
+sudo ./scripts/decrypt.sh /var/backups/hedgii/hedgii_backup_20261018_020000.zip.gpg /tmp/restore
+```
+
+**On any other machine (no Hedgii config)**: fetch the archive, then give the passphrase file.
+```bash
+rclone copy onedrive:hedgii-backups/hedgii_backup_20261018_020000.zip.gpg .
+./scripts/decrypt.sh --passphrase-file ./passphrase hedgii_backup_20261018_020000.zip.gpg ./restored
+```
+
+Without the script: `gpg --decrypt FILE.gpg > archive`, then `unzip archive` or `tar -xzf archive`.
+`hedgii_backup_report.txt` at the root of the archive lists what it contains; databases are in
+the `output_file` paths of the custom commands (`databases/...`).
+
 ## 🔍 Restore Tests
 
 `hedgii verify` takes the newest archive (from the rclone remote by default, `--local` for
@@ -879,11 +903,6 @@ embedded `hedgii_backup_report.txt`. The temp dir is removed on every exit path,
 through the notifications, and it exits 6 on failure. The installer offers a weekly cron entry
 (`/etc/cron.d/hedgii-backup`). With the OneDrive client (upload-only), it checks the local archive.
 
-Restoring by hand, on any machine, without a Hedgii config:
-
-```bash
-./scripts/decrypt.sh --passphrase-file ./passphrase hedgii_backup_20261018_020000.zip.gpg ./restored
-```
 
 ## 📊 Monitoring & Reporting
 
@@ -920,12 +939,35 @@ sudo chmod 600 /etc/hedgii/gpg_passphrase
 sudo hedgii test-commands
 ```
 
-**❌ "rclone upload failed"**
+**❌ "rclone upload failed" / "rclone remote not configured"**
 ```bash
-# Test rclone configuration
-rclone ls onedrive:
-rclone config reconnect onedrive:
+# Tests the configured remote (exact name) with a write/read/delete probe
+sudo hedgii test-sync
+# Hedgii only reads settings.rclone_config (default /etc/hedgii/rclone.conf), not your user's rclone.conf
+sudo hedgii setup-rclone
+# "invalid_grant" / "token expired": refresh the OAuth token
+sudo rclone config reconnect onedrive: --config /etc/hedgii/rclone.conf
 ```
+A WARN "Using legacy rclone config /root/.config/rclone/rclone.conf" means the install predates
+`rclone_config`: run `sudo hedgii setup-rclone` once to move it. Google Drive tokens of an OAuth
+app left in "Testing" mode expire after 7 days (see the headless rclone section above).
+
+**❌ "Another Hedgii run is already in progress" (exit 5)**
+```bash
+# A backup or verify is running (or a stuck process holds /var/lock/hedgii.lock)
+pgrep -af hedgii
+```
+
+**❌ "Not enough free space" (exit 7)**
+```bash
+sudo hedgii prune --dry-run   # what retention would remove
+sudo hedgii peek              # archives, uploaded or not, and disk usage
+```
+Or set `"staging_mode": "direct"` to skip the staging copy, or lower `min_free_space_ratio`.
+
+**❌ "Archive never uploaded (kept)"**
+Hedgii never deletes an archive that was not uploaded. Re-upload it (`rclone copy FILE remote:`),
+the next run will see it on the remote and mark it, or delete it by hand if it's not needed.
 
 ### **Debug Mode**
 ```bash

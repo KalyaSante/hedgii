@@ -24,6 +24,21 @@ EXIT_ALREADY_RUNNING=5
 EXIT_VERIFY_FAILED=6
 EXIT_NO_SPACE=7
 
+# Single source of truth: the version file, next to the script in a checkout,
+# or in /usr/local/share/hedgii once installed by install.sh
+hedgii_version() {
+    local dir f
+    dir=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
+    for f in "$dir/version" /usr/local/share/hedgii/version; do
+        if [[ -r "$f" ]]; then
+            tr -d '[:space:]' < "$f"
+            return 0
+        fi
+    done
+    echo "unknown"
+}
+HEDGII_VERSION=$(hedgii_version)
+
 # Configuration
 CONFIG_FILE="${HEDGII_CONFIG_FILE:-/etc/hedgii/hedgii_config.json}"
 DATE=$(date +%Y%m%d_%H%M%S)
@@ -999,7 +1014,7 @@ generate_backup_report() {
 Generated: $(date)
 Server: $(hostname)
 User: $(whoami)
-Hedgii Version: 1.0-kawaii-multisync
+Hedgii Version: $HEDGII_VERSION
 
 🎯 BACKUP SUMMARY:
 Staging mode: $(get_staging_mode)
@@ -1989,8 +2004,11 @@ case "${1:-curl}" in
         hedgii_log "KAWAII" "📣 Testing notifications..."
         hedgii_test_notify
         ;;
+    "version"|"--version"|"-v")
+        echo "Hedgii $HEDGII_VERSION"
+        ;;
     *)
-        echo "🦔 Hedgii Commands:"
+        echo "🦔 Hedgii $HEDGII_VERSION - Commands:"
         echo "  curl              - Backup your data with enhanced sync (default)"
         echo "  peek              - Check backup status"
         echo "  prune [--dry-run] - Apply retention policy to local/remote backups"
@@ -2002,6 +2020,7 @@ case "${1:-curl}" in
         echo "  edit-config       - Edit configuration with nano"
         echo "  change-passphrase - Change GPG encryption passphrase"
         echo "  compression-info  - Show current compression format information"
+        echo "  version           - Show the Hedgii version"
         echo "  test-notify       - Send a test message on each configured notification channel"
         echo ""
         echo "🔄 Sync Commands:"

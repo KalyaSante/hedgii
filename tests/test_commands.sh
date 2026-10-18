@@ -21,4 +21,5 @@ check "test-commands" 0 run "$TMP/good.json" test-commands
 check "peek" 0 run "$TMP/good.json" peek
 check "guard" 0 run "$TMP/good.json" guard
 check "help" 0 run "$TMP/good.json" help
+check "version matches the version file" 0 bash -c '[[ "$(HEDGII_CONFIG_FILE="$1" bash "$2/hedgii.sh" version)" == "Hedgii $(cat "$2/version")" ]]' _ "$TMP/good.json" "$ROOT"
 exit $fail

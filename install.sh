@@ -356,7 +356,10 @@ install_hedgii_script() {
     if [[ -f "hedgii.sh" ]]; then
         cp "hedgii.sh" "$INSTALL_DIR/$SCRIPT_NAME"
         chmod +x "$INSTALL_DIR/$SCRIPT_NAME"
-        hedgii_install_log "INFO" "Hedgii script installed to $INSTALL_DIR/$SCRIPT_NAME"
+        # Read at runtime by hedgii (report, "hedgii version")
+        mkdir -p /usr/local/share/hedgii
+        install -m 644 version /usr/local/share/hedgii/version
+        hedgii_install_log "INFO" "Hedgii $(tr -d '[:space:]' < version) installed to $INSTALL_DIR/$SCRIPT_NAME"
     else
         hedgii_install_log "ERROR" "hedgii.sh not found in current directory"
         exit 1

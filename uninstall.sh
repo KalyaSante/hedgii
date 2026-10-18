@@ -201,6 +201,8 @@ remove_script_files() {
         hedgii_uninstall_log "INFO" "Removed main script: $INSTALL_DIR/$SCRIPT_NAME"
     fi
     
+    rm -rf /usr/local/share/hedgii
+
     # Remove symlink
     if [[ -L "/usr/bin/hedgii" ]]; then
         rm -f "/usr/bin/hedgii"
