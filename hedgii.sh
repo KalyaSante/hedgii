@@ -460,12 +460,22 @@ cleanup_staging() {
     echo "$staging_dir"
 }
 
+# List effective exclusions (global + per-source when an index is given)
+get_effective_exclusions() {
+    local source_index="${1:-}"
+    jq -r '(.exclusions // [])[]' "$CONFIG_FILE"
+    if [[ -n "$source_index" ]]; then
+        jq -r ".backup_sources[$source_index].exclude // [] | .[]" "$CONFIG_FILE"
+    fi
+}
+
 # Copy resource intelligently
 copy_resource() {
     local source="$1"
     local dest_relative="$2"
     local description="$3"
     local staging_dir="$4"
+    local source_index="${5:-}"
 
     local dest_full="$staging_dir/$dest_relative"
     local dest_dir=$(dirname "$dest_full")
@@ -481,7 +491,12 @@ copy_resource() {
     mkdir -p "$dest_dir"
 
     if [[ -d "$source" ]]; then
-        rsync -av --exclude="*.tmp" --exclude=".git" "$source/" "$dest_full/"
+        local -a exclude_args=()
+        local pattern
+        while IFS= read -r pattern; do
+            [[ -n "$pattern" ]] && exclude_args+=("--exclude=$pattern")
+        done < <(get_effective_exclusions "$source_index")
+        rsync -av ${exclude_args[@]+"${exclude_args[@]}"} "$source/" "$dest_full/"
     else
         cp "$source" "$dest_full"
     fi
@@ -646,7 +661,7 @@ process_sources_with_commands() {
         local destination=$(jq -r ".backup_sources[$i].destination" "$CONFIG_FILE")
         local description=$(jq -r ".backup_sources[$i].description" "$CONFIG_FILE")
 
-        if copy_resource "$source" "$destination" "$description" "$staging_dir"; then
+        if copy_resource "$source" "$destination" "$description" "$staging_dir" "$i"; then
             success_count=$((success_count + 1))
         fi
     done
@@ -717,7 +732,7 @@ encrypt_staging() {
     set -o pipefail
     if [[ "$archive_extension" == "zip" ]]; then
         hedgii_log "INFO" "🦔 Creating ZIP archive for Windows compatibility..." >&2
-        (cd "$staging_dir" && zip -q -r - . -x "*.tmp" "*.log.old" "node_modules/*" ".git/*" "*.cache" 2>>"$LOG_FILE") \
+        (cd "$staging_dir" && zip -q -r - . 2>>"$LOG_FILE") \
             | gpg --symmetric --cipher-algo AES256 --batch --yes \
                 --passphrase-file "$passphrase_file" \
                 --output "$encrypted_file" 2>>"$LOG_FILE" || rc=$?
@@ -1096,6 +1111,16 @@ cmd_validate_config() {
         custom_count=$(jq '.custom_commands | length' "$CONFIG_FILE")
         source_count=$(jq '.backup_sources | length' "$CONFIG_FILE")
         hedgii_log "INFO" "📊 Found $custom_count custom commands, $source_count file sources"
+        hedgii_log "INFO" "🚫 Effective global exclusions:"
+        local excl idx src_excl
+        excl=$(jq -r '(.exclusions // [])[] | "   - " + .' "$CONFIG_FILE")
+        echo "${excl:-   (none)}"
+        for ((idx=0; idx<source_count; idx++)); do
+            src_excl=$(jq -r ".backup_sources[$idx].exclude // [] | .[]" "$CONFIG_FILE" | paste -sd, -)
+            if [[ -n "$src_excl" ]]; then
+                echo "   • $(jq -r ".backup_sources[$idx].source" "$CONFIG_FILE"): $src_excl"
+            fi
+        done
     else
         hedgii_log "ERROR" "✗ Configuration JSON is invalid"
         return 1
