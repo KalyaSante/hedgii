@@ -5,6 +5,13 @@
 
 set -euo pipefail
 
+# Exit codes
+EXIT_CONFIG_ERROR=1
+EXIT_COLLECT_FAILED=2
+EXIT_COMPRESS_FAILED=3
+EXIT_UPLOAD_FAILED=4
+EXIT_ALREADY_RUNNING=5
+
 # Configuration
 CONFIG_FILE="${HEDGII_CONFIG_FILE:-/etc/hedgii/hedgii_config.json}"
 DATE=$(date +%Y%m%d_%H%M%S)
@@ -76,14 +83,14 @@ check_dependencies() {
                 hedgii_log "INFO" "  Arch: sudo pacman -S zip"
             fi
             
-            exit 1
+            exit $EXIT_CONFIG_ERROR
         fi
     done
 
     if [[ ! -f "$CONFIG_FILE" ]]; then
         hedgii_log "ERROR" "Config file not found: $CONFIG_FILE"
         hedgii_log "INFO" "Copy config/hedgii_config.json.example to $CONFIG_FILE"
-        exit 1
+        exit $EXIT_CONFIG_ERROR
     fi
 }
 
@@ -753,14 +760,26 @@ encrypt_staging() {
 hedgii_curl() {
     hedgii_log "KAWAII" "🦔 Hedgii is ready to protect your data with enhanced sync powers! ✨"
 
+    local start_time=$SECONDS
+
     check_dependencies
+
+    # Prevent concurrent runs
+    local lock_file="${HEDGII_LOCK_FILE:-/var/lock/hedgii.lock}"
+    if command -v flock >/dev/null 2>&1; then
+        exec 9>"$lock_file"
+        if ! flock -n 9; then
+            hedgii_log "ERROR" "Another Hedgii backup is already running"
+            exit $EXIT_ALREADY_RUNNING
+        fi
+    fi
 
     local staging_dir=$(cleanup_staging)
 
     # Use enhanced processing with custom commands
     if ! process_sources_with_commands "$staging_dir"; then
         hedgii_log "ERROR" "Data collection failed!"
-        exit 1
+        exit $EXIT_COLLECT_FAILED
     fi
 
     # Generate comprehensive report
@@ -771,19 +790,27 @@ hedgii_curl() {
     if encrypted_file=$(encrypt_staging "$staging_dir" 2>&1 | tail -n1); then
         # Vérifier que nous avons bien un fichier valide
         if [[ -f "$encrypted_file" ]]; then
+            local size destination duration
+            size=$(du -h "$encrypted_file" | cut -f1)
+            destination=$(get_sync_method)
             if smart_upload_to_cloud "$encrypted_file"; then
+                duration=$((SECONDS - start_time))
                 hedgii_log "KAWAII" "🎉 Backup completed successfully! Your data is safe! (≧◡≦)"
+                hedgii_log "INFO" "SUMMARY status=success duration=${duration}s size=$size destination=$destination file=$(basename "$encrypted_file")"
                 rm -rf "$staging_dir"
             else
+                duration=$((SECONDS - start_time))
                 hedgii_log "ERROR" "Upload failed, keeping local backup"
+                hedgii_log "ERROR" "SUMMARY status=upload_failed duration=${duration}s size=$size destination=$destination file=$encrypted_file"
+                exit $EXIT_UPLOAD_FAILED
             fi
         else
             hedgii_log "ERROR" "Encryption failed - no valid file produced"
-            exit 1
+            exit $EXIT_COMPRESS_FAILED
         fi
     else
         hedgii_log "ERROR" "Backup failed!"
-        exit 1
+        exit $EXIT_COMPRESS_FAILED
     fi
 }
 

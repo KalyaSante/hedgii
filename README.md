@@ -139,6 +139,18 @@ sudo ./hedgii.sh test-commands
 sudo ./hedgii.sh curl
 ```
 
+### **Exit Codes**
+`hedgii.sh curl` ends with a one-line `SUMMARY` log (status, duration, size, destination) and one of these exit codes:
+
+| Code | Meaning |
+| --- | --- |
+| 0 | Backup created and uploaded |
+| 1 | Configuration error or missing dependency |
+| 2 | Collection failure (source or blocking custom_command) |
+| 3 | Compression or encryption failure |
+| 4 | Upload failure (archive kept locally) |
+| 5 | Another run already in progress |
+
 ---
 
 ## 📋 Configuration
