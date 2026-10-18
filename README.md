@@ -91,7 +91,7 @@ Hedgii isn't just another backup script - it's your kawaii guardian that protect
 - **Flexible JSON configuration** - no more hardcoded paths
 - **Intelligent error handling** with continue-on-error options
 - **Staging directory management** - clean and organized
-- **Automatic cleanup** of old backups
+- **Automatic cleanup** of old local backups (configurable `retention`, never deletes archives that were not uploaded)
 - **Interactive setup wizard** for sync clients
 - **Detailed logging** with kawaii emojis for easy reading
 
@@ -290,6 +290,23 @@ Control Hedgii's behavior and sync options:
   }
 }
 ```
+
+#### **🧹 retention** - Backup Retention
+
+```json
+"retention": {
+  "local_keep_last": 3,
+  "local_keep_days": 7,
+  "remote_keep_days": 0
+}
+```
+
+- After a verified upload, the archive is marked with an `<archive>.uploaded` file.
+- Local purge deletes only *uploaded* archives beyond the newest `local_keep_last` **and** older than `local_keep_days`.
+- An archive that was never uploaded is **never** deleted automatically; it is reported as `WARN` at each run, by `hedgii peek` and `hedgii-doctor`.
+- `remote_keep_days` (`0` = disabled): with rclone, runs `rclone delete <remote> --min-age <N>d --include 'hedgii_backup_*'`. Not supported with the OneDrive client (a warning is logged).
+- The copy placed in the OneDrive sync folder is always removed after each run.
+- `hedgii prune [--dry-run]` applies the policy on demand; `hedgii peek` shows archive count and disk usage.
 
 #### **🗂️ Backup & Storage Settings**
 
@@ -600,6 +617,9 @@ sudo hedgii curl
 
 # 👀 Check backup status
 sudo hedgii peek
+
+# 🧹 Apply retention policy (list only with --dry-run)
+sudo hedgii prune [--dry-run]
 
 # 🛡️ View protection status
 sudo hedgii guard

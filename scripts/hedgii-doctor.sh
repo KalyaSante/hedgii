@@ -268,7 +268,19 @@ check_disk_space() {
             fi
         fi
     done
-    
+
+    local cfg="/etc/hedgii/hedgii_config.json"
+    if [[ -f "$cfg" ]] && command -v jq >/dev/null 2>&1; then
+        local bdir=$(jq -r '.settings.backup_dir // "/var/backups/hedgii"' "$cfg" 2>/dev/null)
+        local f
+        for f in "$bdir"/hedgii_backup_*.gpg; do
+            [[ -f "$f" ]] || continue
+            if [[ ! -f "$f.uploaded" ]]; then
+                doctor_log "WARN" "Archive never uploaded (never auto-deleted): $f"
+            fi
+        done
+    fi
+
     echo ""
 }
 
