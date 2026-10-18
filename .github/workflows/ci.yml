@@ -16,7 +16,7 @@ jobs:
       - name: Install ShellCheck
         run: sudo apt-get update && sudo apt-get install -y shellcheck
       - name: Check shell scripts
-        run: shellcheck --severity=error hedgii.sh install.sh uninstall.sh scripts/*.sh tests/*.sh
+        run: shellcheck --severity=error hedgii.sh install.sh uninstall.sh scripts/*.sh tests/*.sh .github/scripts/*.sh
 
   tests:
     name: Command and backup/restore tests
@@ -29,3 +29,23 @@ jobs:
         run: bash tests/test_commands.sh
       - name: Backup and restore integration tests
         run: bash tests/integration.sh
+
+  # A version bump reaching master becomes a tag + GitHub release, once the checks are green
+  release:
+    name: Release
+    needs: [shellcheck, tests]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: release
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history and tags: release.sh walks the version bumps
+      - name: Create missing releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash .github/scripts/release.sh
