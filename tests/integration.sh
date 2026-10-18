@@ -138,6 +138,54 @@ rc=0; hedgii curl || rc=$?
 check "gpg failure exits 3 (got $rc)" test "$rc" -eq 3
 check "gpg failure reported as a gpg failure" grep -q "Encryption failed (gpg exit code 2)" "$TMP/run.out"
 
+# A file that vanishes while the backup runs is left out with a WARN: the run still succeeds (#32)
+mkdir -p "$TMP/vanishbin"
+for fmt in tar.gz zip; do
+    archiver=${fmt%.gz}
+    rm -f "$TMP/vanishbin/"*
+    echo "rotated soon" > "$SRC1/nested/rotated.log"
+    # Removes the file after the dry run listed it, right before the real archiver reads it
+    printf '#!/bin/sh\nrm -f "%s"\nexec "%s" "$@"\n' "$SRC1/nested/rotated.log" "$(command -v "$archiver")" > "$TMP/vanishbin/$archiver"
+    chmod +x "$TMP/vanishbin/$archiver"
+    write_config "$fmt" "test:$REMOTE/" '.settings.staging_mode = "direct"'
+    : > "$HEDGII_LOG_FILE"
+    rc=0; PATH="$TMP/vanishbin:$PATH" bash "$ROOT/hedgii.sh" curl >>"$TMP/run.out" 2>&1 || rc=$?
+    archive=$(newest_archive "$fmt")
+    check "direct $fmt, vanished file: curl exits 0 (got $rc)" test "$rc" -eq 0
+    check "direct $fmt, vanished file: archive uploaded" test -f "$REMOTE/$(basename "$archive")"
+    check "direct $fmt, vanished file: WARN with the count" grep -q '\[WARN\] 1 file(s) vanished or unreadable while archiving' "$HEDGII_LOG_FILE"
+    check "direct $fmt, vanished file: no ERROR" bash -c '! grep -q "\[ERROR\]" "$1"' _ "$HEDGII_LOG_FILE"
+    check "direct $fmt, vanished file: verify passes with a warning" hedgii verify --local --archive "$(basename "$archive")"
+done
+rm -f "$TMP/vanishbin/"*
+
+# Copy mode: rsync exit 24 ("some files vanished") is a WARN, other rsync errors stay errors
+printf '#!/bin/sh\ncase " $* " in *" --dry-run "*) exec "%s" "$@" ;; esac\n"%s" "$@" || exit $?\necho "file has vanished: \\"/srv/app/cache/x.tmp\\"" >&2\nexit 24\n' \
+    "$(command -v rsync)" "$(command -v rsync)" > "$TMP/vanishbin/rsync"
+chmod +x "$TMP/vanishbin/rsync"
+write_config tar.gz "test:$REMOTE/"
+: > "$HEDGII_LOG_FILE"
+rc=0; PATH="$TMP/vanishbin:$PATH" bash "$ROOT/hedgii.sh" curl >>"$TMP/run.out" 2>&1 || rc=$?
+check "copy, vanished file: curl exits 0 (got $rc)" test "$rc" -eq 0
+check "copy, vanished file: archive uploaded" test -f "$REMOTE/$(basename "$(newest_archive tar.gz)")"
+check "copy, vanished file: WARN with the count" grep -q '\[WARN\]   1 file(s) vanished during the copy' "$HEDGII_LOG_FILE"
+check "copy, vanished file: source not reported as failed" bash -c '! grep -q "Copy failed" "$1"' _ "$HEDGII_LOG_FILE"
+rm -rf "$TMP/vanishbin"
+
+# Unreadable file in direct mode: left out and counted in the WARN, not silently dropped.
+# Root reads everything, so this only runs unprivileged (as in CI).
+if [[ $EUID -ne 0 ]]; then
+    echo "secret" > "$SRC1/nested/locked.txt"
+    chmod 000 "$SRC1/nested/locked.txt"
+    write_config tar.gz "test:$REMOTE/" '.settings.staging_mode = "direct"'
+    : > "$HEDGII_LOG_FILE"
+    rc=0; hedgii curl || rc=$?
+    check "direct, unreadable file: curl exits 0 (got $rc)" test "$rc" -eq 0
+    check "direct, unreadable file: WARN with the count" grep -q '\[WARN\] 1 file(s) vanished or unreadable while archiving' "$HEDGII_LOG_FILE"
+    check "direct, unreadable file: tar's message is in the log" grep -q 'locked.txt: .*Cannot open: Permission denied' "$HEDGII_LOG_FILE"
+    rm -f "$SRC1/nested/locked.txt"
+fi
+
 # Not enough free space: stops before copying anything, with sizes in the message
 write_config tar.gz "test:$REMOTE/" '.settings.min_free_space_ratio = 1e18'
 before=$(find "$BACKUPS" -name 'hedgii_backup_*.gpg' | wc -l)

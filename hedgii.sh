@@ -860,7 +860,20 @@ copy_resource() {
         stage_direct_source "$source" "$dest_relative" "$staging_dir" "$source_index"
     elif [[ -d "$source" ]]; then
         build_rsync_excludes "$source_index"
-        rsync -av ${RSYNC_EXCLUDES[@]+"${RSYNC_EXCLUDES[@]}"} "$source/" "$dest_full/"
+        local rsync_err rsync_rc=0 vanished
+        rsync_err=$(mktemp)
+        rsync -av ${RSYNC_EXCLUDES[@]+"${RSYNC_EXCLUDES[@]}"} "$source/" "$dest_full/" 2>"$rsync_err" || rsync_rc=$?
+        cat "$rsync_err" >&2
+        cat "$rsync_err" >> "$LOG_FILE"
+        vanished=$(grep -c 'file has vanished' "$rsync_err" || true)
+        rm -f "$rsync_err"
+        # 24 = "some files vanished before they could be transferred": live data (rotated logs,
+        # temp files), everything else was copied
+        if [[ $rsync_rc -eq 24 ]]; then
+            hedgii_log "WARN" "  ${vanished:-?} file(s) vanished during the copy of $source, left out of the backup"
+            rsync_rc=0
+        fi
+        [[ $rsync_rc -eq 0 ]]
     else
         cp "$source" "$dest_full"
     fi
@@ -1103,16 +1116,19 @@ encrypt_staging() {
           cat "$staging_dir.lists/"*.list; } > "$file_list"
     fi
 
-    local archiver
+    local archiver archiver_err
     local -a status=()
+    archiver_err=$(mktemp)
     # PIPESTATUS tells which side failed. The { } || true keeps set -e from exiting before it is read.
     if [[ "$archive_extension" == "zip" ]]; then
         archiver="zip"
         hedgii_log "INFO" "🦔 Creating ZIP archive for Windows compatibility..." >&2
         { if [[ -n "$file_list" ]]; then
-            (cd "$staging_dir" && tr '\0' '\n' < "$file_list" | zip -q - -@ 2>>"$LOG_FILE")
+            # No -q here: with it, zip drops a listed file that vanished without a word (exit 0).
+            # Its "adding:" progress lines are filtered out of the log below.
+            (cd "$staging_dir" && tr '\0' '\n' < "$file_list" | zip - -@ 2>>"$archiver_err")
           else
-            (cd "$staging_dir" && zip -q -r - . 2>>"$LOG_FILE")
+            (cd "$staging_dir" && zip -q -r - . 2>>"$archiver_err")
           fi | gpg --symmetric --cipher-algo AES256 --batch --yes \
                 --passphrase-file "$passphrase_file" \
                 --output "$encrypted_file" 2>>"$LOG_FILE"
@@ -1121,16 +1137,30 @@ encrypt_staging() {
         archiver="tar"
         hedgii_log "INFO" "🦔 Creating TAR.GZ archive..." >&2
         { if [[ -n "$file_list" ]]; then
-            tar -czf - -C "$staging_dir" --no-recursion --null --verbatim-files-from -T "$file_list" 2>>"$LOG_FILE"
+            # Direct mode reads live files listed earlier: one that vanished since (rotated log)
+            # or can't be read is reported and left out instead of failing the archive
+            tar -czf - -C "$staging_dir" --no-recursion --null --verbatim-files-from --ignore-failed-read \
+                -T "$file_list" 2>>"$archiver_err"
           else
-            tar -czf - -C "$staging_dir" . 2>>"$LOG_FILE"
+            tar -czf - -C "$staging_dir" . 2>>"$archiver_err"
           fi | gpg --symmetric --cipher-algo AES256 --batch --yes \
                 --passphrase-file "$passphrase_file" \
                 --output "$encrypted_file" 2>>"$LOG_FILE"
           status=("${PIPESTATUS[@]}"); } || true
     fi
 
-    local archive_rc="${status[0]:-1}" gpg_rc="${status[1]:-1}"
+    local archive_rc="${status[0]:-1}" gpg_rc="${status[1]:-1}" skipped
+    skipped=$(grep -cE 'Cannot (stat|open|read)|File removed before we read it|name not matched|could not open for reading' \
+        "$archiver_err" || true)
+    grep -v '^ *adding: ' "$archiver_err" >> "$LOG_FILE" || true
+    rm -f "$archiver_err"
+    # zip exits 18 when some listed files could not be read: the archive holds all the others
+    if [[ "$archiver" == "zip" && "$archive_rc" -eq 18 && "$skipped" -gt 0 && -n "$file_list" ]]; then
+        archive_rc=0
+    fi
+    if [[ "$skipped" -gt 0 && "$archive_rc" -eq 0 ]]; then
+        hedgii_log "WARN" "$skipped file(s) vanished or unreadable while archiving, left out of the archive (see log)" >&2
+    fi
     # tar exits 1 when a file changed while it was read (live data in direct mode): the archive
     # is complete and valid, the file is just not a consistent snapshot
     if [[ "$archiver" == "tar" && "$archive_rc" -eq 1 ]]; then
@@ -1616,9 +1646,15 @@ verify_archive() {
     expected=$(sed -n 's/^Total files: *\([0-9][0-9]*\).*/\1/p' "$report_file" | head -n1)
     actual=$(grep -c . <<<"$listing" || true)
     # Fewer files than reported means data is missing. More is possible (zip follows symlinks).
+    # In direct mode the report is written before the archive, from a listing of live files: some
+    # can vanish before tar reads them (the backup log has a WARN for those), so it's a warning.
     if [[ -n "$expected" && "$actual" -lt "$expected" ]]; then
-        hedgii_log "ERROR" "Archive holds $actual files, report says $expected"
-        return 1
+        if grep -q '^Staging mode: direct' "$report_file"; then
+            hedgii_log "WARN" "Archive holds $actual files, report says $expected: $((expected - actual)) file(s) vanished while the direct-mode backup ran (see its log)"
+        else
+            hedgii_log "ERROR" "Archive holds $actual files, report says $expected"
+            return 1
+        fi
     fi
     hedgii_log "INFO" "✅ Archive OK: $actual files (report: ${expected:-?})"
 }
@@ -1700,10 +1736,10 @@ hedgii_curl() {
         notif_backup_result failure "$rc" "$start_epoch" "$archive" "$dest"
     else
         notif_ping success
-        # A successful run that logged errors (failed non-blocking command...) or left an
-        # archive behind is reported as a warning. Plain WARN lines don't count: tools like
-        # mysqldump write harmless warnings to stderr on every run.
-        if grep -qE '\[ERROR\]|Archive never uploaded' "$LOG_FILE" 2>/dev/null; then
+        # A successful run that logged errors (failed non-blocking command...), lost files that
+        # vanished while it ran, or left an archive behind is reported as a warning. Plain WARN
+        # lines don't count: tools like mysqldump write harmless warnings to stderr on every run.
+        if grep -qE '\[ERROR\]|Archive never uploaded|vanished' "$LOG_FILE" 2>/dev/null; then
             notif_backup_result warning 0 "$start_epoch" "$archive" "$dest"
         else
             notif_backup_result success 0 "$start_epoch" "$archive" "$dest"
