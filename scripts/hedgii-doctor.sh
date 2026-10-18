@@ -5,6 +5,8 @@
 
 set -euo pipefail
 
+CONFIG_FILE="${HEDGII_CONFIG_FILE:-/etc/hedgii/hedgii_config.json}"
+
 # Colors for kawaii output
 PINK='\033[1;35m'
 GREEN='\033[1;32m'
@@ -479,25 +481,22 @@ main() {
     show_welcome
     check_system_info
 
+    # Each check returns its issue count: "|| ..." keeps set -e from stopping at the first issue
     local total_issues=0
 
-    check_hedgii_installation
-    total_issues=$((total_issues + $?))
+    check_hedgii_installation || total_issues=$((total_issues + $?))
 
-    check_dependencies
-    total_issues=$((total_issues + $?))
+    check_dependencies || total_issues=$((total_issues + $?))
 
     check_repositories
 
-    check_cron_jobs
-    total_issues=$((total_issues + $?))
+    check_cron_jobs || total_issues=$((total_issues + $?))
 
     check_disk_space
 
-    test_sync_clients
-    total_issues=$((total_issues + $?))
+    test_sync_clients || total_issues=$((total_issues + $?))
     
-    test_backup
+    test_backup || total_issues=$((total_issues + 1))
     
     show_summary $total_issues
 }
