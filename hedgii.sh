@@ -582,13 +582,14 @@ execute_custom_commands() {
         local output_file=$(jq -r ".custom_commands[$i].output_file" "$CONFIG_FILE")
         local timeout=$(jq -r ".custom_commands[$i].timeout // 300" "$CONFIG_FILE")
         local working_dir=$(jq -r ".custom_commands[$i].working_dir // \"/tmp\"" "$CONFIG_FILE")
-        local continue_on_error=$(jq -r ".custom_commands[$i].continue_on_error // true" "$CONFIG_FILE")
+        # Not "// true": jq's // treats an explicit false as missing
+        local continue_on_error=$(jq -r ".custom_commands[$i] | if has(\"continue_on_error\") then .continue_on_error else true end" "$CONFIG_FILE")
 
         local default_require="false"
         case "$output_file" in
             *.sql|*.dump|*.archive) default_require="true" ;;
         esac
-        local require_output=$(jq -r ".custom_commands[$i].require_output // \"$default_require\"" "$CONFIG_FILE")
+        local require_output=$(jq -r --arg d "$default_require" ".custom_commands[$i] | if has(\"require_output\") then .require_output else \$d end" "$CONFIG_FILE")
         local stderr_file=$(jq -r ".custom_commands[$i].stderr_file // empty" "$CONFIG_FILE")
         [[ -n "$stderr_file" ]] && stderr_file="$staging_dir/$stderr_file"
 
