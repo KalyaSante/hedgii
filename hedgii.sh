@@ -488,9 +488,12 @@ execute_command_with_timeout() {
     local working_dir="$2"
     local timeout="$3"
     local output_file="$4"
+    local require_output="${5:-false}"
+    local stderr_file="${6:-}"
 
     # Create a temporary script for the command
     local temp_script=$(mktemp)
+    local temp_stderr=$(mktemp)
     cat > "$temp_script" << EOF
 #!/bin/bash
 cd "$working_dir"
@@ -498,24 +501,41 @@ $command
 EOF
     chmod +x "$temp_script"
 
-    # Execute with timeout
-    if timeout "$timeout" bash "$temp_script" > "$output_file" 2>&1; then
-        local exit_code=$?
-        rm -f "$temp_script"
+    # Execute with timeout: stdout goes to output file, stderr is captured separately
+    timeout "$timeout" bash "$temp_script" > "$output_file" 2> "$temp_stderr"
+    local exit_code=$?
+    rm -f "$temp_script"
 
-        # Check if output file was created and has content
+    if [[ -s "$temp_stderr" ]]; then
+        if [[ $exit_code -eq 0 ]]; then
+            hedgii_log "WARN" "  Command wrote to stderr (last 20 lines):"
+        else
+            hedgii_log "ERROR" "  Command stderr (last 20 lines):"
+        fi
+        while IFS= read -r line; do
+            hedgii_log "INFO" "    $line"
+        done < <(tail -n 20 "$temp_stderr")
+    fi
+
+    if [[ -n "$stderr_file" ]]; then
+        mkdir -p "$(dirname "$stderr_file")"
+        cp "$temp_stderr" "$stderr_file"
+    fi
+    rm -f "$temp_stderr"
+
+    if [[ $exit_code -eq 0 ]]; then
         if [[ -f "$output_file" && -s "$output_file" ]]; then
             local file_size=$(stat -c%s "$output_file")
             hedgii_log "INFO" "  Output size: $(numfmt --to=iec --suffix=B $file_size)"
             return 0
+        elif [[ "$require_output" == "true" ]]; then
+            hedgii_log "ERROR" "  Command succeeded but produced empty output (require_output is enabled)"
+            return 1
         else
             hedgii_log "WARN" "  Command succeeded but no output generated"
             return 0
         fi
     else
-        local exit_code=$?
-        rm -f "$temp_script"
-
         if [[ $exit_code -eq 124 ]]; then
             hedgii_log "ERROR" "  Command timed out after ${timeout}s"
         else
@@ -550,6 +570,14 @@ execute_custom_commands() {
         local working_dir=$(jq -r ".custom_commands[$i].working_dir // \"/tmp\"" "$CONFIG_FILE")
         local continue_on_error=$(jq -r ".custom_commands[$i].continue_on_error // true" "$CONFIG_FILE")
 
+        local default_require="false"
+        case "$output_file" in
+            *.sql|*.dump|*.archive) default_require="true" ;;
+        esac
+        local require_output=$(jq -r ".custom_commands[$i].require_output // \"$default_require\"" "$CONFIG_FILE")
+        local stderr_file=$(jq -r ".custom_commands[$i].stderr_file // empty" "$CONFIG_FILE")
+        [[ -n "$stderr_file" ]] && stderr_file="$staging_dir/$stderr_file"
+
         hedgii_log "INFO" "🔧 Executing: $description"
         hedgii_log "INFO" "  Command: $command"
         hedgii_log "INFO" "  Output: $output_file"
@@ -562,7 +590,7 @@ execute_custom_commands() {
         local full_output_path="$staging_dir/$output_file"
 
         # Execute command with timeout
-        if execute_command_with_timeout "$command" "$working_dir" "$timeout" "$full_output_path"; then
+        if execute_command_with_timeout "$command" "$working_dir" "$timeout" "$full_output_path" "$require_output" "$stderr_file"; then
             hedgii_log "INFO" "  ✓ Command successful"
             ((success_count++))
         else
