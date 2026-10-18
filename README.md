@@ -168,7 +168,7 @@ sudo ./hedgii.sh curl
 ```
 
 ### **Exit Codes**
-`hedgii.sh curl` ends with a one-line `SUMMARY` log (status, duration, size, destination) and one of these exit codes:
+`hedgii curl` ends with a one-line `SUMMARY` log (status, duration, size, destination) and one of these exit codes (`verify` uses 0, 1, 5 and 6):
 
 | Code | Meaning |
 | --- | --- |
@@ -177,7 +177,8 @@ sudo ./hedgii.sh curl
 | 2 | Collection failure (source or blocking custom_command) |
 | 3 | Compression or encryption failure |
 | 4 | Upload failure (archive kept locally) |
-| 5 | Another run already in progress |
+| 5 | Another run already in progress (`flock` on `/var/lock/hedgii.lock`, override with `HEDGII_LOCK_FILE`) |
+| 6 | `hedgii verify`: the archive could not be downloaded, decrypted or checked |
 
 ---
 
@@ -264,7 +265,7 @@ Execute commands to capture database dumps, system state, and more:
 - `output_file` *(string, required)*: Relative path where command output is saved
 - `timeout` *(integer, optional)*: Maximum execution time in seconds (default: 300)
 - `working_dir` *(string, optional)*: Directory to execute command in (default: "/tmp")
-- `continue_on_error` *(boolean, optional)*: Whether to continue backup if command fails (default: true)
+- `continue_on_error` *(boolean, optional)*: Whether to continue backup if command fails (default: true). Before 1.5 an explicit `false` was silently ignored; it is now honored, so a failing blocking command (e.g. `mysqldump` on a server without MySQL) stops the backup with exit code 2
 - `require_output` *(boolean, optional)*: Fail the command if stdout is empty (default: true when `output_file` ends with `.sql`, `.dump` or `.archive`, otherwise false). Only stdout is written to `output_file`; stderr is logged (last 20 lines) and never mixed into the dump
 - `stderr_file` *(string, optional)*: Relative path in the archive where the command's stderr is kept
 
@@ -649,6 +650,12 @@ sudo hedgii peek
 # 🧹 Apply retention policy (list only with --dry-run)
 sudo hedgii prune [--dry-run]
 
+# 🔍 Prove the latest backup is restorable (download, decrypt, test, compare with the report)
+sudo hedgii verify [--remote|--local] [--archive NAME]
+
+# 📣 Send a test message on every configured notification channel
+sudo hedgii test-notify
+
 # 🛡️ View protection status
 sudo hedgii guard
 
@@ -676,6 +683,9 @@ sudo hedgii test-sync
 
 # 🔧 Interactive sync setup wizard
 sudo hedgii setup-sync
+
+# ☁️ Guided rclone setup (headless OAuth) + write test
+sudo hedgii setup-rclone
 
 # 📤 Setup OneDrive client specifically
 sudo hedgii setup-onedrive
@@ -844,6 +854,24 @@ Add a `notifications` block to your config (see `config/hedgii_config.json.examp
 Messages include host, duration, archive size, destination, exit code and last errors.
 A notification failure is logged as WARN and never fails the backup.
 Validate with `hedgii test-notify`.
+
+A successful run is reported as `warning` when it logged an `[ERROR]` (a non-blocking command
+failed, for instance) or when an older archive is still waiting to be uploaded.
+
+## 🔍 Restore Tests
+
+`hedgii verify` takes the newest archive (from the rclone remote by default, `--local` for
+`backup_dir`, `--archive NAME` for a given one), decrypts it in a private temp dir next to
+`staging_dir`, runs `unzip -t` / `tar -t`, and checks that it holds at least as many files as its
+embedded `hedgii_backup_report.txt`. The temp dir is removed on every exit path, the result goes
+through the notifications, and it exits 6 on failure. The installer offers a weekly cron entry
+(`/etc/cron.d/hedgii-backup`). With the OneDrive client (upload-only), it checks the local archive.
+
+Restoring by hand, on any machine, without a Hedgii config:
+
+```bash
+./scripts/decrypt.sh --passphrase-file ./passphrase hedgii_backup_20261018_020000.zip.gpg ./restored
+```
 
 ## 📊 Monitoring & Reporting
 
