@@ -353,7 +353,7 @@ Control Hedgii's behavior and sync options:
 
 - `staging_mode` *(string, optional)*: How directory sources reach the archive
   - **`"copy"`** (default): copied to staging with rsync, then archived. Needs the size of the sources twice on disk while the run lasts (staging + archive)
-  - **`"direct"`**: archived in place, without a copy. Staging only holds the custom command outputs and single files. Exclusions behave the same (the file list comes from an rsync dry run). Files are read while the services keep writing them, exactly as rsync would in copy mode. Needs `perl` (to decode rsync's file list). Sockets, FIFOs and devices are skipped. With `"zip"`, file names containing a newline can't be stored and are skipped with an error (use `tar.gz`)
+  - **`"direct"`**: archived in place, without a copy. Staging only holds the custom command outputs and single files. Exclusions behave the same (the file list comes from an rsync dry run). Files are read while the services keep writing them, exactly as rsync would in copy mode. Needs `perl` (to decode rsync's file list). Sockets, FIFOs and devices are skipped. With `"zip"`, file names containing a newline can't be stored and are skipped with an error (use `tar.gz`). A file that vanishes between the listing and the archiving (rotated log, temp file) or can't be read is left out with a WARN giving the count; the run ends as a ⚠️ warning, and `verify` accepts that gap in direct-mode archives
 
 - `min_free_space_ratio` *(number, optional)*: Free space margin checked before a run
   - Default: `1.2`. `0` disables the check
@@ -966,6 +966,10 @@ sudo hedgii prune --dry-run   # what retention would remove
 sudo hedgii peek              # archives, uploaded or not, and disk usage
 ```
 Or set `"staging_mode": "direct"` to skip the staging copy, or lower `min_free_space_ratio`.
+
+**⚠️ "N file(s) vanished ..."**
+A file was deleted or rotated while the backup ran (logs, caches, temp files): it is left out,
+everything else is backed up and uploaded. If it's always the same directory, exclude it.
 
 **❌ "Archive never uploaded (kept)"**
 Hedgii never deletes an archive that was not uploaded. Re-upload it (`rclone copy FILE remote:`),
