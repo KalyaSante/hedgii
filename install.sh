@@ -150,17 +150,17 @@ install_dependencies() {
                 install_packages_individually_apt
             else
                 # Normal installation
-                if ! apt-get install -y jq gpg rsync curl cron logrotate zip; then
+                if ! apt-get install -y jq gpg rsync curl cron logrotate zip unzip; then
                     hedgii_install_log "WARN" "Bulk installation failed, trying individual packages..."
                     install_packages_individually_apt
                 fi
             fi
             ;;
         "yum"|"dnf")
-            $package_manager install -y jq gnupg2 rsync curl crontabs logrotate zip
+            $package_manager install -y jq gnupg2 rsync curl crontabs logrotate zip unzip util-linux
             ;;
         "pacman")
-            pacman -Sy --noconfirm jq gnupg rsync curl cronie logrotate zip
+            pacman -Sy --noconfirm jq gnupg rsync curl cronie logrotate zip unzip util-linux
             ;;
     esac
 
@@ -304,7 +304,7 @@ install_onedrive_from_source() {
 
 # Install packages individually for problematic apt systems
 install_packages_individually_apt() {
-    local packages=("jq" "gpg" "rsync" "curl" "cron" "logrotate" "zip")
+    local packages=("jq" "gpg" "rsync" "curl" "cron" "logrotate" "zip" "unzip")
     local failed_packages=()
 
     hedgii_install_log "INFO" "Installing packages individually..."
@@ -428,7 +428,8 @@ EOF
         fi
     fi
 
-    chmod 644 "$config_file"
+    # May hold webhook URLs, chat ids or DB credentials in custom commands
+    chmod 600 "$config_file"
 }
 
 # Setup GPG passphrase
@@ -494,6 +495,15 @@ setup_cron_job() {
         cron_minute="$input_minute"
     fi
 
+    # Weekly restore test (hedgii verify)
+    local verify_line="# Weekly restore test: hedgii verify (enable by removing the leading #)"$'\n'"#"
+    local verify_choice
+    read -p "🔍 Add a weekly restore test (hedgii verify, Sunday 04:30)? (Y/n): " verify_choice
+    if [[ ! "$verify_choice" =~ ^[Nn] ]]; then
+        verify_line="# Weekly restore test: downloads, decrypts and checks the latest backup"$'\n'
+    fi
+    verify_line+="30 4 * * 0 root $INSTALL_DIR/$SCRIPT_NAME verify >> $LOG_DIR/hedgii_cron.log 2>&1"
+
     # Create cron job
     local cron_file="/etc/cron.d/hedgii-backup"
     cat > "$cron_file" << EOF
@@ -505,6 +515,8 @@ PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
 
 # Daily backup at ${cron_hour}:${cron_minute}
 ${cron_minute} ${cron_hour} * * * root $INSTALL_DIR/$SCRIPT_NAME curl >> $LOG_DIR/hedgii_cron.log 2>&1
+
+${verify_line}
 
 # Weekly cleanup of old logs (Sunday at 3 AM)
 0 3 * * 0 root find $LOG_DIR -name "*.log" -mtime +30 -delete
