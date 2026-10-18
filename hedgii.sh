@@ -509,8 +509,9 @@ EOF
     chmod +x "$temp_script"
 
     # Execute with timeout: stdout goes to output file, stderr is captured separately
-    timeout "$timeout" bash "$temp_script" > "$output_file" 2> "$temp_stderr"
-    local exit_code=$?
+    # "|| exit_code=$?" keeps set -e from aborting if this is ever called outside an if
+    local exit_code=0
+    timeout "$timeout" bash "$temp_script" > "$output_file" 2> "$temp_stderr" || exit_code=$?
     rm -f "$temp_script"
 
     if [[ -s "$temp_stderr" ]]; then
