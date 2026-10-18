@@ -447,12 +447,22 @@ cleanup_staging() {
     echo "$staging_dir"
 }
 
+# List effective exclusions (global + per-source when an index is given)
+get_effective_exclusions() {
+    local source_index="${1:-}"
+    jq -r '(.exclusions // [])[]' "$CONFIG_FILE"
+    if [[ -n "$source_index" ]]; then
+        jq -r ".backup_sources[$source_index].exclude // [] | .[]" "$CONFIG_FILE"
+    fi
+}
+
 # Copy resource intelligently
 copy_resource() {
     local source="$1"
     local dest_relative="$2"
     local description="$3"
     local staging_dir="$4"
+    local source_index="${5:-}"
 
     local dest_full="$staging_dir/$dest_relative"
     local dest_dir=$(dirname "$dest_full")
@@ -468,7 +478,12 @@ copy_resource() {
     mkdir -p "$dest_dir"
 
     if [[ -d "$source" ]]; then
-        rsync -av --exclude="*.tmp" --exclude=".git" "$source/" "$dest_full/"
+        local -a exclude_args=()
+        local pattern
+        while IFS= read -r pattern; do
+            [[ -n "$pattern" ]] && exclude_args+=("--exclude=$pattern")
+        done < <(get_effective_exclusions "$source_index")
+        rsync -av ${exclude_args[@]+"${exclude_args[@]}"} "$source/" "$dest_full/"
     else
         cp "$source" "$dest_full"
     fi
@@ -603,7 +618,7 @@ process_sources_with_commands() {
         local destination=$(jq -r ".backup_sources[$i].destination" "$CONFIG_FILE")
         local description=$(jq -r ".backup_sources[$i].description" "$CONFIG_FILE")
 
-        if copy_resource "$source" "$destination" "$description" "$staging_dir"; then
+        if copy_resource "$source" "$destination" "$description" "$staging_dir" "$i"; then
             ((success_count++))
         fi
     done
@@ -671,7 +686,7 @@ encrypt_staging() {
             local temp_zip="/tmp/hedgii_temp_${DATE}.zip"
 
             # Créer l'archive ZIP en silence
-            if (cd "$staging_dir" && zip -q -r "$temp_zip" . -x "*.tmp" "*.log.old" "node_modules/*" ".git/*" "*.cache" 2>/dev/null); then
+            if (cd "$staging_dir" && zip -q -r "$temp_zip" . 2>/dev/null); then
                 hedgii_log "INFO" "ZIP archive created successfully" >&2
                 compress_command="cat '$temp_zip'"
             else
@@ -1053,6 +1068,16 @@ case "${1:-curl}" in
             local custom_count=$(jq '.custom_commands | length' "$CONFIG_FILE")
             local source_count=$(jq '.backup_sources | length' "$CONFIG_FILE")
             hedgii_log "INFO" "📊 Found $custom_count custom commands, $source_count file sources"
+            hedgii_log "INFO" "🚫 Effective global exclusions:"
+            local excl
+            excl=$(jq -r '(.exclusions // [])[] | "   - " + .' "$CONFIG_FILE")
+            echo "${excl:-   (none)}"
+            local idx
+            for ((idx=0; idx<source_count; idx++)); do
+                local src_excl
+                src_excl=$(jq -r ".backup_sources[$idx].exclude // [] | .[]" "$CONFIG_FILE" | paste -sd, -)
+                [[ -n "$src_excl" ]] && echo "   • $(jq -r ".backup_sources[$idx].source" "$CONFIG_FILE"): $src_excl"
+            done
         else
             hedgii_log "ERROR" "✗ Configuration JSON is invalid"
             exit 1
