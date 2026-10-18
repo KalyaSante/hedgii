@@ -21,6 +21,7 @@ EXIT_COLLECT_FAILED=2
 EXIT_COMPRESS_FAILED=3
 EXIT_UPLOAD_FAILED=4
 EXIT_ALREADY_RUNNING=5
+EXIT_VERIFY_FAILED=6
 
 # Configuration
 CONFIG_FILE="${HEDGII_CONFIG_FILE:-/etc/hedgii/hedgii_config.json}"
@@ -991,11 +992,32 @@ warn_unsent_archives() {
     done < <(list_archives "$backup_dir")
 }
 
+# Mark unmarked local archives that already exist on the rclone remote (archives made before
+# markers existed, or whose post-upload check failed). Not possible with the OneDrive client.
+reconcile_uploaded_markers() {
+    local backup_dir="$1" f remote_list
+    [[ "$(get_sync_method 2>/dev/null)" == "rclone" ]] || return 0
+    local -a unmarked=()
+    while IFS= read -r f; do
+        [[ -n "$f" && ! -f "$f$UPLOADED_SUFFIX" ]] && unmarked+=("$f")
+    done < <(list_archives "$backup_dir")
+    [[ ${#unmarked[@]} -gt 0 ]] || return 0
+
+    remote_list=$(hedgii_rclone lsf "$(get_rclone_remote)" --files-only --include 'hedgii_backup_*' 2>/dev/null) || return 0
+    for f in "${unmarked[@]}"; do
+        if grep -Fxq "$(basename "$f")" <<<"$remote_list"; then
+            mark_uploaded "$f"
+            hedgii_log "INFO" "Found on remote, marked as uploaded: $(basename "$f")"
+        fi
+    done
+}
+
 # Apply local retention policy. $1 = "dry-run" to only list.
 prune_local() {
     local mode="${1:-}"
     local backup_dir keep_last keep_days
     backup_dir=$(get_backup_dir)
+    [[ "$mode" == "dry-run" ]] || reconcile_uploaded_markers "$backup_dir"
     keep_last=$(get_retention local_keep_last 3)
     keep_days=$(get_retention local_keep_days 7)
 
@@ -1262,6 +1284,139 @@ hedgii_curl_run() {
         hedgii_log "ERROR" "SUMMARY status=upload_failed duration=${duration}s size=$size destination=$destination file=$encrypted_file"
         exit $EXIT_UPLOAD_FAILED
     fi
+}
+
+# ---------------------------------------------------------------------------
+# verify: prove that a backup can actually be restored
+# ---------------------------------------------------------------------------
+
+# Download (remote) or pick (local) the archive to check. Prints its path on stdout.
+verify_fetch_archive() {
+    local source="$1" name="$2" work_dir="$3"
+    local backup_dir
+    backup_dir=$(get_backup_dir)
+
+    if [[ "$source" == "remote" ]]; then
+        local remote
+        remote=$(get_rclone_remote)
+        if [[ -z "$name" ]]; then
+            # Names embed the timestamp, so the last one in lexical order is the newest
+            name=$(hedgii_rclone lsf "$remote" --files-only --include 'hedgii_backup_*.gpg' 2>>"$LOG_FILE" | sort | tail -n1) || name=""
+            [[ -n "$name" ]] || { hedgii_log "ERROR" "No archive found on $remote" >&2; return 1; }
+        fi
+        hedgii_log "INFO" "📥 Downloading $name from $remote..." >&2
+        if ! hedgii_rclone copyto "${remote%/}/$name" "$work_dir/$name" 2>>"$LOG_FILE"; then
+            hedgii_log "ERROR" "Download failed: ${remote%/}/$name" >&2
+            return 1
+        fi
+        echo "$work_dir/$name"
+    else
+        local archive
+        if [[ -n "$name" ]]; then
+            archive="$backup_dir/$name"
+        else
+            archive=$(list_archives "$backup_dir" | head -n1)
+        fi
+        [[ -n "$archive" && -f "$archive" ]] || { hedgii_log "ERROR" "No local archive found${name:+: $name}" >&2; return 1; }
+        echo "$archive"
+    fi
+}
+
+# Decrypt, test the archive and compare its content with the embedded report
+verify_archive() {
+    local archive="$1" work_dir="$2"
+    local passphrase_file listing expected actual report_file="$work_dir/report.txt"
+    passphrase_file=$(jq -r '.settings.encrypt_passphrase_file' "$CONFIG_FILE")
+
+    hedgii_log "INFO" "🔓 Decrypting $(basename "$archive")..."
+    if ! gpg --batch --quiet --passphrase-file "$passphrase_file" --decrypt "$archive" \
+        > "$work_dir/archive" 2>>"$LOG_FILE"; then
+        hedgii_log "ERROR" "Decryption failed (wrong passphrase, truncated or corrupted archive)"
+        return 1
+    fi
+
+    case "$archive" in
+        *.zip.gpg)
+            command -v unzip >/dev/null 2>&1 || { hedgii_log "ERROR" "unzip is required to verify ZIP backups"; return 1; }
+            if ! unzip -tq "$work_dir/archive" >>"$LOG_FILE" 2>&1; then
+                hedgii_log "ERROR" "ZIP integrity test failed"
+                return 1
+            fi
+            listing=$(unzip -Z1 "$work_dir/archive" | grep -v '/$' || true)
+            unzip -p "$work_dir/archive" hedgii_backup_report.txt > "$report_file" 2>/dev/null || true
+            ;;
+        *.tar.gz.gpg)
+            if ! listing=$(tar -tvzf "$work_dir/archive" 2>>"$LOG_FILE"); then
+                hedgii_log "ERROR" "TAR.GZ integrity test failed"
+                return 1
+            fi
+            listing=$(grep '^-' <<<"$listing" || true)
+            tar -xzf "$work_dir/archive" -O ./hedgii_backup_report.txt > "$report_file" 2>/dev/null || true
+            ;;
+        *)
+            hedgii_log "ERROR" "Unknown archive format: $(basename "$archive")"
+            return 1
+            ;;
+    esac
+
+    if [[ ! -s "$report_file" ]]; then
+        hedgii_log "ERROR" "hedgii_backup_report.txt missing from the archive"
+        return 1
+    fi
+    expected=$(sed -n 's/^Total files: *\([0-9][0-9]*\).*/\1/p' "$report_file" | head -n1)
+    actual=$(grep -c . <<<"$listing" || true)
+    # Fewer files than reported means data is missing. More is possible (zip follows symlinks).
+    if [[ -n "$expected" && "$actual" -lt "$expected" ]]; then
+        hedgii_log "ERROR" "Archive holds $actual files, report says $expected"
+        return 1
+    fi
+    hedgii_log "INFO" "✅ Archive OK: $actual files (report: ${expected:-?})"
+}
+
+hedgii_verify() {
+    local source="remote" name=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --remote) source="remote"; shift ;;
+            --local) source="local"; shift ;;
+            --archive) name="${2:-}"; shift 2 || true ;;
+            --archive=*) name="${1#*=}"; shift ;;
+            *) hedgii_log "ERROR" "Usage: hedgii verify [--remote|--local] [--archive <name>]"; exit $EXIT_CONFIG_ERROR ;;
+        esac
+    done
+
+    acquire_lock
+    check_dependencies
+    if [[ "$source" == "remote" && "$(get_sync_method 2>/dev/null)" != "rclone" ]]; then
+        hedgii_log "WARN" "Remote verify needs rclone (the OneDrive client is upload-only), checking the local archive instead"
+        source="local"
+    fi
+
+    local staging_base work_dir
+    staging_base=$(jq -r '.settings.staging_dir // "/tmp/hedgii_staging"' "$CONFIG_FILE")
+    mkdir -p "$(dirname "$staging_base")"
+    # Same filesystem as staging (already sized for the data), private, removed on every exit path
+    work_dir=$(mktemp -d "${staging_base%/}.verify.XXXXXX") || exit $EXIT_CONFIG_ERROR
+    STAGING_DIR="$work_dir"
+
+    hedgii_log "KAWAII" "🔍 Verifying the latest $source backup..."
+    local archive rc=0
+    if ! archive=$(verify_fetch_archive "$source" "$name" "$work_dir"); then
+        rc=$EXIT_VERIFY_FAILED
+    elif ! verify_archive "$archive" "$work_dir"; then
+        rc=$EXIT_VERIFY_FAILED
+    fi
+
+    local level="success" icon="✅" result="restorable"
+    if [[ $rc -ne 0 ]]; then
+        level="failure"; icon="❌"; result="NOT restorable"
+    fi
+    hedgii_log "INFO" "SUMMARY verify=$level source=$source archive=$(basename "${archive:-none}")"
+    if notif_enabled_for "$level"; then
+        NOTIF_SENT=()
+        notif_send "$icon Hedgii verify on $(hostname): $(basename "${archive:-no archive}") ($source) is $result" || true
+    fi
+    return $rc
 }
 
 # Backup wrapper: ping + notifications around the actual run
@@ -1677,6 +1832,10 @@ case "${1:-curl}" in
     "compression-info")
         show_compression_info
         ;;
+    "verify")
+        shift
+        hedgii_verify "$@"
+        ;;
     "test-notify")
         hedgii_log "KAWAII" "📣 Testing notifications..."
         hedgii_test_notify
@@ -1686,6 +1845,8 @@ case "${1:-curl}" in
         echo "  curl              - Backup your data with enhanced sync (default)"
         echo "  peek              - Check backup status"
         echo "  prune [--dry-run] - Apply retention policy to local/remote backups"
+        echo "  verify [--remote|--local] [--archive NAME]"
+        echo "                    - Download, decrypt and test the latest backup"
         echo "  guard             - View protection status"
         echo "  test-commands     - Test custom commands without full backup"
         echo "  validate-config   - Validate configuration file"
