@@ -9,8 +9,8 @@ umask 077
 STAGING_DIR=""
 ENCRYPTED_FILE=""
 cleanup_on_exit() {
-    if [[ -n "${STAGING_DIR:-}" && -d "$STAGING_DIR" ]]; then
-        rm -rf "$STAGING_DIR"
+    if [[ -n "${STAGING_DIR:-}" ]]; then
+        rm -rf "$STAGING_DIR" "$STAGING_DIR.lists"
     fi
 }
 trap cleanup_on_exit EXIT
@@ -22,6 +22,7 @@ EXIT_COMPRESS_FAILED=3
 EXIT_UPLOAD_FAILED=4
 EXIT_ALREADY_RUNNING=5
 EXIT_VERIFY_FAILED=6
+EXIT_NO_SPACE=7
 
 # Configuration
 CONFIG_FILE="${HEDGII_CONFIG_FILE:-/etc/hedgii/hedgii_config.json}"
@@ -662,6 +663,131 @@ get_effective_exclusions() {
     fi
 }
 
+# rsync --exclude arguments for a source (global + per-source), into the RSYNC_EXCLUDES array
+build_rsync_excludes() {
+    RSYNC_EXCLUDES=()
+    local pattern
+    while IFS= read -r pattern; do
+        [[ -n "$pattern" ]] && RSYNC_EXCLUDES+=("--exclude=$pattern")
+    done < <(get_effective_exclusions "${1:-}")
+    return 0
+}
+
+# Dry run of a directory source with its exclusions: prints the total size in bytes.
+# With $3, also writes the itemized list ("%i|%n" lines) there.
+source_dry_run() {
+    local source="$1" index="$2" list_file="${3:-/dev/null}" empty out
+    build_rsync_excludes "$index"
+    empty=$(mktemp -d)
+    if ! out=$(LC_ALL=C rsync -a --dry-run --stats --out-format='%i|%n' \
+        ${RSYNC_EXCLUDES[@]+"${RSYNC_EXCLUDES[@]}"} "$source/" "$empty/" 2>>"$LOG_FILE"); then
+        rmdir "$empty"
+        return 1
+    fi
+    rmdir "$empty"
+    grep -E '^.{11}\|' <<<"$out" > "$list_file" || true
+    sed -n 's/^Total file size: \([0-9,.]*\) bytes.*/\1/p' <<<"$out" | tr -d ',.'
+}
+
+get_staging_mode() {
+    local mode
+    mode=$(jq -r '.settings.staging_mode // "copy"' "$CONFIG_FILE")
+    case "$mode" in
+        copy|direct) echo "$mode" ;;
+        *) hedgii_log "WARN" "Unknown staging_mode '$mode', using copy" >&2; echo "copy" ;;
+    esac
+}
+
+human_size() {
+    numfmt --to=iec --suffix=B "$1" 2>/dev/null || echo "${1}B"
+}
+
+# Fails if <dir> has less than <bytes> x settings.min_free_space_ratio available
+require_free_space() {
+    local label="$1" dir="$2" bytes="$3" ratio need avail
+    ratio=$(jq -r '.settings.min_free_space_ratio // 1.2' "$CONFIG_FILE")
+    need=$(awk -v b="$bytes" -v r="$ratio" 'BEGIN { printf "%.0f", b * r }')
+    avail=$(df -P -B1 "$dir" | awk 'NR == 2 { print $4 }')
+    if [[ "$avail" -lt "$need" ]]; then
+        hedgii_log "ERROR" "Not enough free space for $label in $dir: need $(human_size "$need") ($(human_size "$bytes") x $ratio), available $(human_size "$avail")"
+        return 1
+    fi
+    hedgii_log "INFO" "Free space for $label in $dir: $(human_size "$avail") available, $(human_size "$need") needed"
+}
+
+# Before collecting anything: estimate the size of the sources (after exclusions) and check that
+# staging (copy mode) and backup_dir can hold it. Custom command outputs can't be known in
+# advance: they are covered by the second check in check_space_before_archive.
+preflight_free_space() {
+    local staging_dir="$1" ratio
+    ratio=$(jq -r '.settings.min_free_space_ratio // 1.2' "$CONFIG_FILE")
+    if awk -v r="$ratio" 'BEGIN { exit !(r <= 0) }'; then
+        return 0
+    fi
+
+    local total=0 count i source bytes
+    count=$(jq '.backup_sources | length' "$CONFIG_FILE")
+    for ((i = 0; i < count; i++)); do
+        source=$(jq -r ".backup_sources[$i].source" "$CONFIG_FILE")
+        if [[ -d "$source" ]]; then
+            bytes=$(source_dry_run "$source" "$i") || bytes=0
+        elif [[ -f "$source" ]]; then
+            bytes=$(stat -c %s "$source")
+        else
+            bytes=0
+        fi
+        total=$((total + ${bytes:-0}))
+    done
+    hedgii_log "INFO" "📏 Estimated size of the sources: $(human_size "$total")"
+
+    local backup_dir
+    backup_dir=$(get_backup_dir)
+    mkdir -p "$backup_dir"
+    # The archive is assumed incompressible (worst case)
+    if [[ "$(get_staging_mode)" == "copy" ]]; then
+        if [[ "$(stat -c %d "$staging_dir")" == "$(stat -c %d "$backup_dir")" ]]; then
+            require_free_space "staging copy + archive" "$backup_dir" $((total * 2))
+        else
+            require_free_space "staging copy" "$staging_dir" "$total" \
+                && require_free_space "archive" "$backup_dir" "$total"
+        fi
+    else
+        require_free_space "archive" "$backup_dir" "$total"
+    fi
+}
+
+# Second check once everything is collected, with the real staging size
+check_space_before_archive() {
+    local staging_dir="$1" ratio staged
+    ratio=$(jq -r '.settings.min_free_space_ratio // 1.2' "$CONFIG_FILE")
+    if awk -v r="$ratio" 'BEGIN { exit !(r <= 0) }'; then
+        return 0
+    fi
+    staged=$(du -sb "$staging_dir" | cut -f1)
+    require_free_space "archive" "$(get_backup_dir)" $((staged + DIRECT_BYTES))
+}
+
+# staging_mode "direct": the source is not copied. A symlink in staging points to it and the
+# rsync-filtered file list is kept in <staging>.lists/, so the archive reads files in place with
+# the same exclusions as a copy.
+DIRECT_BYTES=0
+DIRECT_FILES=0
+stage_direct_source() {
+    local source="$1" dest_relative="$2" staging_dir="$3" source_index="$4"
+    local lists_dir="$staging_dir.lists" items bytes
+    mkdir -p "$lists_dir"
+    items=$(mktemp "$lists_dir/items.XXXXXX")
+    if ! bytes=$(source_dry_run "$source" "$source_index" "$items"); then
+        return 1
+    fi
+    ln -s "$(realpath "$source")" "$staging_dir/$dest_relative"
+    cut -d'|' -f2- "$items" | awk -v d="$dest_relative" '$0 != "./" { print d "/" $0 }' \
+        > "$lists_dir/$source_index.list"
+    DIRECT_FILES=$((DIRECT_FILES + $(grep -c '^>f' "$items" || true)))
+    DIRECT_BYTES=$((DIRECT_BYTES + ${bytes:-0}))
+    rm -f "$items"
+}
+
 # Copy resource intelligently
 copy_resource() {
     local source="$1"
@@ -683,13 +809,11 @@ copy_resource() {
 
     mkdir -p "$dest_dir"
 
-    if [[ -d "$source" ]]; then
-        local -a exclude_args=()
-        local pattern
-        while IFS= read -r pattern; do
-            [[ -n "$pattern" ]] && exclude_args+=("--exclude=$pattern")
-        done < <(get_effective_exclusions "$source_index")
-        rsync -av ${exclude_args[@]+"${exclude_args[@]}"} "$source/" "$dest_full/"
+    if [[ -d "$source" && "$(get_staging_mode)" == "direct" ]]; then
+        stage_direct_source "$source" "$dest_relative" "$staging_dir" "$source_index"
+    elif [[ -d "$source" ]]; then
+        build_rsync_excludes "$source_index"
+        rsync -av ${RSYNC_EXCLUDES[@]+"${RSYNC_EXCLUDES[@]}"} "$source/" "$dest_full/"
     else
         cp "$source" "$dest_full"
     fi
@@ -878,9 +1002,10 @@ User: $(whoami)
 Hedgii Version: 1.0-kawaii-multisync
 
 🎯 BACKUP SUMMARY:
-Total files: $(find "$staging_dir" -type f | wc -l)
+Staging mode: $(get_staging_mode)
+Total files: $(( $(find "$staging_dir" -type f | wc -l) + DIRECT_FILES ))
 Total directories: $(find "$staging_dir" -type d | wc -l)
-Total size: $(du -sh "$staging_dir" | cut -f1)
+Total size: $(human_size $(( $(du -sb "$staging_dir" | cut -f1) + DIRECT_BYTES )))
 
 📁 BACKUP CONTENTS:
 $(find "$staging_dir" -type f -exec ls -lh {} \; | head -20)
@@ -921,18 +1046,34 @@ encrypt_staging() {
     hedgii_log "INFO" "Curling up into a protective ball... 🦔" >&2
     hedgii_log "INFO" "Output file: $(basename "$encrypted_file")" >&2
 
+    # Direct mode: archive an explicit file list (staging content without the source symlinks,
+    # plus the filtered lists of the sources) instead of recursing into staging
+    local file_list=""
+    if [[ -d "$staging_dir.lists" ]]; then
+        file_list="$staging_dir.lists/archive.files"   # not *.list: read by the glob below
+        # "./" prefix: same member names as the recursive tar of copy mode (zip strips it)
+        { (cd "$staging_dir" && find . -mindepth 1 ! -type l)
+          sed 's|^|./|' "$staging_dir.lists/"*.list; } > "$file_list"
+    fi
+
     local rc=0
     set -o pipefail
     if [[ "$archive_extension" == "zip" ]]; then
         hedgii_log "INFO" "🦔 Creating ZIP archive for Windows compatibility..." >&2
-        (cd "$staging_dir" && zip -q -r - . 2>>"$LOG_FILE") \
-            | gpg --symmetric --cipher-algo AES256 --batch --yes \
+        if [[ -n "$file_list" ]]; then
+            (cd "$staging_dir" && zip -q - -@ < "$file_list" 2>>"$LOG_FILE")
+        else
+            (cd "$staging_dir" && zip -q -r - . 2>>"$LOG_FILE")
+        fi | gpg --symmetric --cipher-algo AES256 --batch --yes \
                 --passphrase-file "$passphrase_file" \
                 --output "$encrypted_file" 2>>"$LOG_FILE" || rc=$?
     else
         hedgii_log "INFO" "🦔 Creating TAR.GZ archive..." >&2
-        tar -czf - -C "$staging_dir" . 2>>"$LOG_FILE" \
-            | gpg --symmetric --cipher-algo AES256 --batch --yes \
+        if [[ -n "$file_list" ]]; then
+            tar -czf - -C "$staging_dir" --no-recursion --verbatim-files-from -T "$file_list" 2>>"$LOG_FILE"
+        else
+            tar -czf - -C "$staging_dir" . 2>>"$LOG_FILE"
+        fi | gpg --symmetric --cipher-algo AES256 --batch --yes \
                 --passphrase-file "$passphrase_file" \
                 --output "$encrypted_file" 2>>"$LOG_FILE" || rc=$?
     fi
@@ -1251,6 +1392,10 @@ hedgii_curl_run() {
     STAGING_DIR="$staging_dir"
     trap cleanup_on_exit EXIT
 
+    if ! preflight_free_space "$staging_dir"; then
+        exit $EXIT_NO_SPACE
+    fi
+
     # Use enhanced processing with custom commands
     if ! process_sources_with_commands "$staging_dir"; then
         hedgii_log "ERROR" "Data collection failed!"
@@ -1259,6 +1404,10 @@ hedgii_curl_run() {
 
     # Generate comprehensive report
     generate_backup_report "$staging_dir"
+
+    if ! check_space_before_archive "$staging_dir"; then
+        exit $EXIT_NO_SPACE
+    fi
 
     if ! encrypt_staging "$staging_dir" || [[ ! -f "$ENCRYPTED_FILE" ]]; then
         hedgii_log "ERROR" "Compression/encryption failed - no valid archive produced"

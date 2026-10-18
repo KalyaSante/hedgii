@@ -124,6 +124,8 @@
     "backup_dir": "/var/backups/hedgii",
     "encrypt_passphrase_file": "/etc/hedgii/gpg_passphrase",
     "compression_format": "zip",
+    "staging_mode": "copy",
+    "min_free_space_ratio": 1.2,
 
     "sync_method": "auto",
     "cloud_provider": "onedrive",

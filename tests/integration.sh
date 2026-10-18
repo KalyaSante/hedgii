@@ -5,7 +5,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+cleanup() { [[ -n "${HTTP_PID:-}" ]] && kill "$HTTP_PID" 2>/dev/null; [[ -n "${KEEP_TMP:-}" ]] || rm -rf "$TMP"; }
+trap cleanup EXIT
 
 for dep in diff gpg jq rclone rsync tar unzip zip flock; do
     command -v "$dep" >/dev/null 2>&1 || { echo "Missing dependency: $dep" >&2; exit 1; }
@@ -54,9 +55,9 @@ write_config() {
 hedgii() { bash "$ROOT/hedgii.sh" "$@" >>"$TMP/run.out" 2>&1; }
 newest_archive() { find "$BACKUPS" -maxdepth 1 -name "hedgii_backup_*.$1.gpg" -printf '%T@ %p\n' | sort -rn | head -1 | cut -d' ' -f2-; }
 
-roundtrip() { # <format> <extension>
-    local fmt="$1" ext="$2" out="$TMP/restore-$1" archive
-    write_config "$fmt" "test:$REMOTE/"
+roundtrip() { # <format> <extension> [jq filter] [label]
+    local fmt="${4:-$1}" ext="$2" out="$TMP/restore-${4:-$1}" archive
+    write_config "$1" "test:$REMOTE/" "${3:-.}"
     check "$fmt: curl exits 0" hedgii curl
     archive=$(newest_archive "$ext")
     check "$fmt: archive created" test -n "$archive"
@@ -69,10 +70,28 @@ roundtrip() { # <format> <extension>
     check "$fmt: per-source exclusion applied" test ! -e "$out/second/local.only" -a -f "$out/second/second.txt"
     check "$fmt: dump contains stdout only" test "$(cat "$out/databases/dump.sql")" = "dump-data"
     check "$fmt: staging removed after run" test -z "$(find "$TMP" -maxdepth 1 -name 'staging.*' -print -quit)"
+    check "$fmt: verify passes" hedgii verify --local --archive "$(basename "$archive")"
 }
 
 roundtrip zip zip
 roundtrip tar.gz tar.gz
+# staging_mode "direct": sources are archived in place, never copied to staging
+ln -s nested/first.txt "$SRC1/link-to-first"
+roundtrip zip zip '.settings.staging_mode = "direct"' direct-zip
+roundtrip tar.gz tar.gz '.settings.staging_mode = "direct"' direct-tar
+check "direct-tar: internal symlink kept as a symlink" test -L "$TMP/restore-direct-tar/first/link-to-first"
+check "direct mode: report counts the source files" grep -q '^Total files: 4$' "$TMP/restore-direct-tar/hedgii_backup_report.txt"
+rm -f "$SRC1/link-to-first"
+
+# Not enough free space: stops before copying anything, with sizes in the message
+write_config tar.gz "test:$REMOTE/" '.settings.min_free_space_ratio = 1e18'
+before=$(find "$BACKUPS" -name 'hedgii_backup_*.gpg' | wc -l)
+runs_before=$(grep -c 'Executing: Fake dump' "$HEDGII_LOG_FILE")
+rc=0; hedgii curl || rc=$?
+check "full disk exits 7 (got $rc)" test "$rc" -eq 7
+check "full disk message has needed and available sizes" grep -q "Not enough free space.*need .*available" "$TMP/run.out"
+check "full disk: no copy and no archive" test "$(find "$BACKUPS" -name 'hedgii_backup_*.gpg' | wc -l)" -eq "$before" -a -z "$(find "$TMP" -maxdepth 1 -name 'staging.*' -print -quit)"
+check "full disk: stopped before the custom commands" test "$(grep -c 'Executing: Fake dump' "$HEDGII_LOG_FILE")" -eq "$runs_before"
 
 # Upload failure: exit code 4, archive kept locally and flagged as not uploaded
 write_config tar.gz "missing:$REMOTE/"
@@ -135,7 +154,6 @@ class H(http.server.BaseHTTPRequestHandler):
 http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
 PY
 HTTP_PID=$!
-trap 'kill $HTTP_PID 2>/dev/null; rm -rf "$TMP"' EXIT
 for _ in $(seq 50); do curl -s -o /dev/null "http://127.0.0.1:$PORT/ready" && break; sleep 0.1; done
 notif='.notifications = {on: ["failure", "warning", "success"], discord_webhook: "http://127.0.0.1:'"$PORT"'/discord", ping_url: "http://127.0.0.1:'"$PORT"'/ping"}'
 write_config tar.gz "test:$REMOTE/" "$notif"

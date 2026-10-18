@@ -181,6 +181,7 @@ sudo ./hedgii.sh curl
 | 4 | Upload failure (archive kept locally) |
 | 5 | Another run already in progress (`flock` on `/var/lock/hedgii.lock`, override with `HEDGII_LOCK_FILE`) |
 | 6 | `hedgii verify`: the archive could not be downloaded, decrypted or checked |
+| 7 | Not enough free space (see `min_free_space_ratio`), nothing was copied |
 
 ---
 
@@ -343,8 +344,17 @@ Control Hedgii's behavior and sync options:
 
 - `staging_dir` *(string, optional)*: Temporary directory for backup preparation
   - Default: `"/tmp/hedgii_staging"`
-  - Must be writable by hedgii user
-  - Cleaned up after each backup
+  - Used as a prefix: each run gets its own private `<staging_dir>.XXXXXX` directory
+  - Removed at the end of every run, failed or not
+
+- `staging_mode` *(string, optional)*: How directory sources reach the archive
+  - **`"copy"`** (default): copied to staging with rsync, then archived. Needs the size of the sources twice on disk while the run lasts (staging + archive)
+  - **`"direct"`**: archived in place, without a copy. Staging only holds the custom command outputs and single files. Exclusions behave the same (the file list comes from an rsync dry run). Files are read while the services keep writing them, exactly as rsync would in copy mode
+
+- `min_free_space_ratio` *(number, optional)*: Free space margin checked before a run
+  - Default: `1.2`. `0` disables the check
+  - Before collecting anything, Hedgii estimates the size of the sources (after exclusions) and stops with exit code 7 if staging (copy mode) or `backup_dir` has less than size × ratio available (both together when they share a filesystem). The archive is assumed incompressible
+  - A second check runs before archiving, with the real staging size (custom command outputs included)
 
 - `backup_dir` *(string, optional)*: Local directory for encrypted backup files
   - Default: `"/var/backups/hedgii"`
