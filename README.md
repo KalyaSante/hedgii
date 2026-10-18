@@ -174,7 +174,7 @@ sudo ./hedgii.sh curl
 ```
 
 ### **Exit Codes**
-`hedgii curl` ends with a one-line `SUMMARY` log (status, duration, size, destination) and one of these exit codes (`verify` uses 0, 1, 5 and 6):
+`hedgii curl` ends with a one-line `SUMMARY` log (status, duration, size, destination) and one of these exit codes (`verify` uses 0, 1, 5, 6 and 7):
 
 | Code | Meaning |
 | --- | --- |
@@ -185,7 +185,7 @@ sudo ./hedgii.sh curl
 | 4 | Upload failure (archive kept locally) |
 | 5 | Another run already in progress (`flock` on `/var/lock/hedgii.lock`, override with `HEDGII_LOCK_FILE`) |
 | 6 | `hedgii verify`: the archive could not be downloaded, decrypted or checked |
-| 7 | Not enough free space (see `min_free_space_ratio`), nothing was copied |
+| 7 | Not enough free space (see `min_free_space_ratio`): nothing was copied, or `verify` downloaded nothing |
 
 ---
 
@@ -897,9 +897,11 @@ the `output_file` paths of the custom commands (`databases/...`).
 ## 🔍 Restore Tests
 
 `hedgii verify` takes the newest archive (from the rclone remote by default, `--local` for
-`backup_dir`, `--archive NAME` for a given one), decrypts it in a private temp dir next to
-`staging_dir`, runs `unzip -t` / `tar -t`, and checks that it holds at least as many files as its
-embedded `hedgii_backup_report.txt`. The temp dir is removed on every exit path, the result goes
+`backup_dir`, `--archive NAME` for a given one) into a private temp dir next to `staging_dir`,
+runs `unzip -t` / `tar -t`, and checks that it holds at least as many files (hard links included)
+as its embedded `hedgii_backup_report.txt`. TAR.GZ archives are decrypted as a stream, so verify
+needs no more disk than the downloaded `.gpg` (nothing at all with `--local`); ZIP needs a
+decrypted copy as well. That space is checked first (`min_free_space_ratio`, exit code 7). The temp dir is removed on every exit path, the result goes
 through the notifications, and it exits 6 on failure. The installer offers a weekly cron entry
 (`/etc/cron.d/hedgii-backup`). With the OneDrive client (upload-only), it checks the local archive.
 

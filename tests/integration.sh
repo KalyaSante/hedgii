@@ -77,11 +77,15 @@ roundtrip zip zip
 roundtrip tar.gz tar.gz
 # staging_mode "direct": sources are archived in place, never copied to staging
 ln -s nested/first.txt "$SRC1/link-to-first"
+# Hard link: tar stores its second name as an "h" entry, verify must count it (#31)
+ln "$SRC1/nested/first.txt" "$SRC1/nested/hardlink.txt"
 roundtrip zip zip '.settings.staging_mode = "direct"' direct-zip
 roundtrip tar.gz tar.gz '.settings.staging_mode = "direct"' direct-tar
 check "direct-tar: internal symlink kept as a symlink" test -L "$TMP/restore-direct-tar/first/link-to-first"
-check "direct mode: report counts the source files" grep -q '^Total files: 4$' "$TMP/restore-direct-tar/hedgii_backup_report.txt"
-rm -f "$SRC1/link-to-first"
+check "direct mode: report counts the source files" grep -q '^Total files: 5$' "$TMP/restore-direct-tar/hedgii_backup_report.txt"
+check "direct-tar: hard link stored as a link entry" bash -c 'gpg --batch -q --passphrase-file "$1" -d "$2" | tar -tvzf - | grep -q "^h.*hardlink.txt"' _ "$TMP/passphrase" "$(newest_archive tar.gz)"
+check "direct-tar: hard link restored" test "$(stat -c %i "$TMP/restore-direct-tar/first/nested/hardlink.txt")" = "$(stat -c %i "$TMP/restore-direct-tar/first/nested/first.txt")"
+rm -f "$SRC1/link-to-first" "$SRC1/nested/hardlink.txt"
 
 # Direct mode with non-ASCII, spaces, backslash escapes and newlines in names; sockets skipped (#30)
 INTL="$SRC2/intl"
@@ -108,6 +112,18 @@ done
 check "direct tar.gz: name with a newline restored" test -f "$TMP/restore-intl-tar.gz/second/intl/$nl_name"
 check "direct zip: name with a newline reported as skipped" grep -q "with a newline skipped" "$TMP/run.out"
 rm -rf "$INTL"
+
+# verify streams tar.gz (no extra disk), needs the decrypted copy for zip and the download for
+# remote, and checks that space before starting (#31)
+write_config tar.gz "test:$REMOTE/" '.settings.min_free_space_ratio = 1e18'
+check "verify --local tar.gz needs no free space" hedgii verify --local --archive "$(basename "$(newest_archive tar.gz)")"
+rc=0; hedgii verify --local --archive "$(basename "$(newest_archive zip)")" || rc=$?
+check "verify --local zip without free space exits 7 (got $rc)" test "$rc" -eq 7
+downloads_before=$(grep -c 'Downloading' "$HEDGII_LOG_FILE" || true)
+rc=0; hedgii verify --remote || rc=$?
+check "verify --remote without free space exits 7 (got $rc)" test "$rc" -eq 7
+check "verify --remote without free space downloads nothing" test "$(grep -c 'Downloading' "$HEDGII_LOG_FILE" || true)" -eq "$downloads_before"
+check "verify space error names the sizes" grep -q "Not enough free space for verify.*need .*available" "$TMP/run.out"
 
 # The failing side of the archive | gpg pipeline is named (#30)
 mkdir -p "$TMP/fakebin"
