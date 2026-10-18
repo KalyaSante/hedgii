@@ -113,6 +113,12 @@
       "continue_on_error": true
     }
   ],
+  "retention": {
+    "local_keep_last": 3,
+    "local_keep_days": 7,
+    "remote_keep_days": 0
+  },
+
   "settings": {
     "staging_dir": "/tmp/hedgii_staging",
     "backup_dir": "/var/backups/hedgii",

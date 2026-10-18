@@ -273,6 +273,8 @@ upload_with_onedrive() {
     fi
 
     local sync_file="$target_dir/$filename"
+    # Always remove the sync-folder copy, whatever the outcome
+    trap 'rm -f "$sync_file"; trap - RETURN' RETURN
 
     if cp "$encrypted_file" "$sync_file"; then
         hedgii_log "INFO" "File copied to sync directory: $sync_file"
@@ -720,7 +722,123 @@ encrypt_staging() {
     fi
 }
 
-# Main backup function with multi-sync support
+# ---- Retention / pruning ----
+UPLOADED_SUFFIX=".uploaded"
+
+get_backup_dir() {
+    jq -r '.settings.backup_dir // "/var/backups/hedgii"' "$CONFIG_FILE"
+}
+
+get_retention() {
+    # $1 = key, $2 = default
+    jq -r --arg k "$1" --arg d "$2" '.retention[$k] // ($d | tonumber)' "$CONFIG_FILE"
+}
+
+mark_uploaded() {
+    touch "$1$UPLOADED_SUFFIX"
+}
+
+# List archives in backup_dir, newest first
+list_archives() {
+    local backup_dir="$1"
+    [[ -d "$backup_dir" ]] || return 0
+    find "$backup_dir" -maxdepth 1 -type f -name 'hedgii_backup_*.gpg' -printf '%T@ %p\n' \
+        | sort -rn | cut -d' ' -f2-
+}
+
+# Warn about archives that were never successfully uploaded
+warn_unsent_archives() {
+    local backup_dir="$1" f
+    while IFS= read -r f; do
+        [[ -z "$f" ]] && continue
+        if [[ ! -f "$f$UPLOADED_SUFFIX" ]]; then
+            hedgii_log "WARN" "Archive never uploaded (kept): $f"
+        fi
+    done < <(list_archives "$backup_dir")
+}
+
+# Apply local retention policy. $1 = "dry-run" to only list.
+prune_local() {
+    local mode="${1:-}"
+    local backup_dir keep_last keep_days
+    backup_dir=$(get_backup_dir)
+    keep_last=$(get_retention local_keep_last 3)
+    keep_days=$(get_retention local_keep_days 7)
+
+    local count=0 removed=0 f now age_days
+    now=$(date +%s)
+    while IFS= read -r f; do
+        [[ -z "$f" ]] && continue
+        # Never delete archives that were not verified as uploaded
+        [[ -f "$f$UPLOADED_SUFFIX" ]] || continue
+        count=$((count + 1))
+        [[ $count -le $keep_last ]] && continue
+        age_days=$(( (now - $(stat -c %Y "$f")) / 86400 ))
+        [[ $age_days -lt $keep_days ]] && continue
+        if [[ "$mode" == "dry-run" ]]; then
+            hedgii_log "INFO" "[dry-run] Would delete: $f"
+        else
+            rm -f "$f" "$f$UPLOADED_SUFFIX"
+            hedgii_log "INFO" "Deleted old local backup: $f"
+        fi
+        removed=$((removed + 1))
+    done < <(list_archives "$backup_dir")
+
+    hedgii_log "INFO" "Local retention (keep_last=$keep_last, keep_days=$keep_days): $removed archive(s) $([[ "$mode" == "dry-run" ]] && echo "would be " )deleted"
+    warn_unsent_archives "$backup_dir"
+}
+
+# Apply optional remote retention. $1 = "dry-run" to only simulate.
+prune_remote() {
+    local mode="${1:-}"
+    local days
+    days=$(get_retention remote_keep_days 0)
+    [[ "$days" -gt 0 ]] 2>/dev/null || return 0
+
+    case "$(get_sync_method)" in
+        "rclone")
+            local remote
+            remote=$(jq -r '.settings.rclone_remote // "onedrive:hedgii-backups/"' "$CONFIG_FILE")
+            local args=(--min-age "${days}d" --include 'hedgii_backup_*')
+            [[ "$mode" == "dry-run" ]] && args+=(--dry-run)
+            hedgii_log "INFO" "Remote retention: deleting backups older than ${days} days on $remote"
+            rclone delete "$remote" "${args[@]}" || hedgii_log "WARN" "Remote retention failed"
+            ;;
+        *)
+            hedgii_log "WARN" "remote_keep_days is not supported with the OneDrive client; ignoring"
+            ;;
+    esac
+}
+
+hedgii_prune() {
+    local mode=""
+    case "${1:-}" in
+        "") ;;
+        "--dry-run") mode="dry-run" ;;
+        *) hedgii_log "ERROR" "Usage: hedgii prune [--dry-run]"; exit 1 ;;
+    esac
+    prune_local "$mode"
+    prune_remote "$mode"
+}
+
+hedgii_peek() {
+    local backup_dir count=0 sent=0 f
+    backup_dir=$(get_backup_dir)
+    hedgii_log "INFO" "Hedgii status: Ready to protect! 🦔"
+    if [[ ! -d "$backup_dir" ]]; then
+        echo "No local backups found"
+        return 0
+    fi
+    while IFS= read -r f; do
+        [[ -z "$f" ]] && continue
+        count=$((count + 1))
+        [[ -f "$f$UPLOADED_SUFFIX" ]] && sent=$((sent + 1))
+    done < <(list_archives "$backup_dir")
+    hedgii_log "INFO" "📦 $count archive(s) in $backup_dir ($sent uploaded, $((count - sent)) not uploaded), using $(du -sh "$backup_dir" | cut -f1)"
+    ls -la "$backup_dir" 2>/dev/null || true
+    warn_unsent_archives "$backup_dir"
+}
+
 # Main backup function with multi-sync support
 hedgii_curl() {
     hedgii_log "KAWAII" "🦔 Hedgii is ready to protect your data with enhanced sync powers! ✨"
@@ -746,8 +864,12 @@ hedgii_curl() {
             if smart_upload_to_cloud "$encrypted_file"; then
                 hedgii_log "KAWAII" "🎉 Backup completed successfully! Your data is safe! (≧◡≦)"
                 rm -rf "$staging_dir"
+                mark_uploaded "$encrypted_file"
+                prune_local || true
+                prune_remote || true
             else
                 hedgii_log "ERROR" "Upload failed, keeping local backup"
+                warn_unsent_archives "$(get_backup_dir)"
             fi
         else
             hedgii_log "ERROR" "Encryption failed - no valid file produced"
@@ -1034,8 +1156,10 @@ case "${1:-curl}" in
         hedgii_curl
         ;;
     "peek")
-        hedgii_log "INFO" "Hedgii status: Ready to protect! 🦔"
-        ls -la /var/backups/hedgii/ 2>/dev/null || echo "No local backups found"
+        hedgii_peek
+        ;;
+    "prune")
+        hedgii_prune "${2:-}"
         ;;
     "guard")
         hedgii_log "INFO" "Hedgii is guarding your data 24/7! 🛡️"
@@ -1107,6 +1231,8 @@ case "${1:-curl}" in
         echo "🦔 Hedgii Commands:"
         echo "  curl              - Backup your data with enhanced sync (default)"
         echo "  peek              - Check backup status"
+        echo "  prune [--dry-run] - Apply retention policy to local/remote backups"
+        echo "  prune [--dry-run] - Apply retention policy to backups"
         echo "  guard             - View protection status"
         echo "  test-commands     - Test custom commands without full backup"
         echo "  validate-config   - Validate configuration file"
