@@ -19,6 +19,7 @@ prefix="${prev:0:1}"
 prefix="${prefix:-v}"
 range="${prev:+$prev..}HEAD"
 
+head_version=$(tr -d '[:space:]' < version 2>/dev/null || true)
 created=0
 while read -r commit; do
     [[ -n "$commit" ]] || continue
@@ -35,6 +36,12 @@ while read -r commit; do
         prev="$tag"
         prev_ref="$commit"
         continue
+    fi
+
+    # The current version is released on HEAD, the commit CI has just validated (fixes merged
+    # after the bump are included). Older bumps being caught up keep their own commit.
+    if [[ "$version" == "$head_version" ]]; then
+        commit=$(git rev-parse HEAD)
     fi
 
     notes=$(mktemp)

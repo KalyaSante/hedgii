@@ -728,7 +728,9 @@ require_free_space() {
     ratio=$(jq -r '.settings.min_free_space_ratio // 1.2' "$CONFIG_FILE")
     need=$(awk -v b="$bytes" -v r="$ratio" 'BEGIN { printf "%.0f", b * r }')
     avail=$(df -P -B1 "$dir" | awk 'NR == 2 { print $4 }')
-    if [[ "$avail" -lt "$need" ]]; then
+    # Compared in awk (floating point): a large ratio can push "need" past bash's 64-bit integers,
+    # where [[ -lt ]] silently wraps around
+    if awk -v a="$avail" -v n="$need" 'BEGIN { exit !(a < n) }'; then
         hedgii_log "ERROR" "Not enough free space for $label in $dir: need $(human_size "$need") ($(human_size "$bytes") x $ratio), available $(human_size "$avail")"
         return 1
     fi
