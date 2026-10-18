@@ -444,19 +444,33 @@ test_sync_clients() {
     done
 }
 
-# Cleanup staging directory
+# Exclusive lock: only one hedgii run at a time (exit code 5 if already running)
+HEDGII_LOCK_FILE="${HEDGII_LOCK_FILE:-/var/lock/hedgii.lock}"
+acquire_lock() {
+    if ! command -v flock >/dev/null 2>&1; then
+        hedgii_log "ERROR" "flock not found (util-linux), cannot guarantee a single run"
+        exit $EXIT_CONFIG_ERROR
+    fi
+    if ! exec 9>"$HEDGII_LOCK_FILE"; then
+        hedgii_log "ERROR" "Cannot open lock file $HEDGII_LOCK_FILE"
+        exit $EXIT_CONFIG_ERROR
+    fi
+    if ! flock -n 9; then
+        hedgii_log "ERROR" "Another Hedgii run is already in progress (lock: $HEDGII_LOCK_FILE)"
+        exit $EXIT_ALREADY_RUNNING
+    fi
+}
+
+# Create a private (0700) staging directory unique to this run (never shared between runs)
 cleanup_staging() {
-    local staging_dir=$(jq -r '.settings.staging_dir // "/tmp/hedgii_staging"' "$CONFIG_FILE")
+    local staging_base=$(jq -r '.settings.staging_dir // "/tmp/hedgii_staging"' "$CONFIG_FILE")
 
-    hedgii_log "INFO" "Cleaning staging directory..." >&2
-
-    # Create a fresh private (0700) staging directory
-    mkdir -p "$(dirname "$staging_dir")"
-    staging_dir=$(mktemp -d "${staging_dir%/}.XXXXXX")
+    local staging_dir
+    mkdir -p "$(dirname "$staging_base")"
+    staging_dir=$(mktemp -d "${staging_base%/}.XXXXXX") || return 1
     chmod 700 "$staging_dir"
     hedgii_log "INFO" "Created clean staging directory: $staging_dir" >&2
 
-    # 🔧 CORRECTION : Retourner SEULEMENT le chemin sur stdout
     echo "$staging_dir"
 }
 
@@ -771,20 +785,12 @@ hedgii_curl() {
 
     local start_time=$SECONDS
 
+    acquire_lock
     check_dependencies
 
-    # Prevent concurrent runs
-    local lock_file="${HEDGII_LOCK_FILE:-/var/lock/hedgii.lock}"
-    if command -v flock >/dev/null 2>&1; then
-        exec 9>"$lock_file"
-        if ! flock -n 9; then
-            hedgii_log "ERROR" "Another Hedgii backup is already running"
-            exit $EXIT_ALREADY_RUNNING
-        fi
-    fi
-
     local staging_dir
-    staging_dir=$(cleanup_staging)
+    staging_dir=$(cleanup_staging) || exit $EXIT_CONFIG_ERROR
+    # Removed by cleanup_on_exit, on every exit path
     STAGING_DIR="$staging_dir"
 
     # Use enhanced processing with custom commands
@@ -1097,6 +1103,8 @@ hedgii_change_passphrase() {
 
 cmd_test_commands() {
     hedgii_log "KAWAII" "🦔 Testing custom commands without full backup..."
+    acquire_lock
+    # STAGING_DIR is deliberately not set: the results stay on disk for inspection
     local staging_dir
     staging_dir=$(cleanup_staging)
     execute_custom_commands "$staging_dir"
