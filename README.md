@@ -225,6 +225,8 @@ Execute commands to capture database dumps, system state, and more:
 - `timeout` *(integer, optional)*: Maximum execution time in seconds (default: 300)
 - `working_dir` *(string, optional)*: Directory to execute command in (default: "/tmp")
 - `continue_on_error` *(boolean, optional)*: Whether to continue backup if command fails (default: true)
+- `require_output` *(boolean, optional)*: Fail the command if stdout is empty (default: true when `output_file` ends with `.sql`, `.dump` or `.archive`, otherwise false). Only stdout is written to `output_file`; stderr is logged (last 20 lines) and never mixed into the dump
+- `stderr_file` *(string, optional)*: Relative path in the archive where the command's stderr is kept
 
 **Command Examples:**
 ```json
