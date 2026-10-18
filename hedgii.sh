@@ -147,6 +147,168 @@ get_sync_method() {
     fi
 }
 
+# --- rclone helpers (single deterministic config file for every call) ---
+RCLONE_DEFAULT_CONFIG="/etc/hedgii/rclone.conf"
+RCLONE_LEGACY_CONFIG="/root/.config/rclone/rclone.conf"
+
+# Explicit settings.rclone_config wins. Without it, installs made before 1.5 keep working on
+# root's own rclone config until it is migrated to /etc/hedgii/rclone.conf.
+get_rclone_config() {
+    local cfg
+    cfg=$(jq -r '.settings.rclone_config // empty' "$CONFIG_FILE")
+    if [[ -n "$cfg" ]]; then
+        echo "$cfg"
+    elif [[ ! -f "$RCLONE_DEFAULT_CONFIG" && -f "$RCLONE_LEGACY_CONFIG" ]]; then
+        echo "$RCLONE_LEGACY_CONFIG"
+    else
+        echo "$RCLONE_DEFAULT_CONFIG"
+    fi
+}
+
+get_rclone_timeout() {
+    local t
+    t=$(jq -r '.settings.rclone_timeout // 60' "$CONFIG_FILE")
+    [[ "$t" =~ ^[0-9]+$ ]] || t=60
+    echo "$t"
+}
+
+get_rclone_remote() {
+    jq -r '.settings.rclone_remote // "onedrive:hedgii-backups/"' "$CONFIG_FILE"
+}
+
+# Run rclone with the configured config file
+hedgii_rclone() {
+    rclone --config "$(get_rclone_config)" "$@"
+}
+
+# Offer to migrate /root/.config/rclone/rclone.conf to the Hedgii config
+migrate_rclone_config() {
+    local cfg legacy="$RCLONE_LEGACY_CONFIG"
+    cfg=$(jq -r '.settings.rclone_config // empty' "$CONFIG_FILE")
+    cfg="${cfg:-$RCLONE_DEFAULT_CONFIG}"
+    [[ -f "$cfg" ]] && return 0
+    [[ -f "$legacy" ]] || return 0
+
+    hedgii_log "WARN" "rclone config not found at $cfg, but $legacy exists"
+    if [[ -t 0 ]]; then
+        local answer
+        read -r -p "Copy $legacy to $cfg? [Y/n] " answer
+        if [[ ! "$answer" =~ ^[Nn] ]]; then
+            mkdir -p "$(dirname "$cfg")"
+            cp "$legacy" "$cfg"
+            chown root:root "$cfg" 2>/dev/null || true
+            chmod 600 "$cfg"
+            hedgii_log "INFO" "✅ rclone config copied to $cfg"
+            return 0
+        fi
+    else
+        hedgii_log "INFO" "Run interactively to migrate: sudo cp $legacy $cfg && sudo chmod 600 $cfg"
+    fi
+    return 0
+}
+
+# Exact remote name match (no substring / regex matching)
+rclone_remote_exists() {
+    local remote_name="${1%%:*}"
+    hedgii_rclone listremotes 2>/dev/null | grep -Fxq "${remote_name}:"
+}
+
+# Detect expired tokens in rclone output and print the reconnect command
+rclone_explain_failure() {
+    local output="$1" remote="$2"
+    local remote_name="${remote%%:*}"
+    if echo "$output" | grep -Eqi 'invalid_grant|token expired|expired token|401|unauthorized'; then
+        hedgii_log "ERROR" "🔑 The OAuth token for '$remote_name' is expired or revoked"
+        hedgii_log "INFO" "Reconnect with: rclone config reconnect ${remote_name}: --config $(get_rclone_config)"
+        hedgii_log "INFO" "Google Drive: apps left in 'Testing' mode expire every 7 days (see README)"
+    fi
+}
+
+# Write probe: upload, read back, delete on the configured remote
+rclone_write_test() {
+    local remote="$1"
+    local timeout_s probe_name probe_local probe_remote out rc=0 content
+    timeout_s=$(get_rclone_timeout)
+    [[ "$remote" == */ || "$remote" == *: ]] || remote="$remote/"
+    probe_name=".hedgii-probe-$(date +%Y%m%d_%H%M%S)"
+    probe_remote="${remote}${probe_name}"
+    probe_local=$(mktemp)
+    content="hedgii-probe-$$-$RANDOM"
+    echo "$content" > "$probe_local"
+
+    if ! out=$(timeout "$timeout_s" rclone --config "$(get_rclone_config)" copyto "$probe_local" "$probe_remote" 2>&1); then
+        hedgii_log "ERROR" "❌ Cannot write to $remote: $out"
+        rclone_explain_failure "$out" "$remote"
+        rm -f "$probe_local"
+        return 1
+    fi
+
+    if ! out=$(timeout "$timeout_s" rclone --config "$(get_rclone_config)" cat "$probe_remote" 2>&1) || [[ "$out" != "$content" ]]; then
+        hedgii_log "ERROR" "❌ Probe file written but could not be read back from $remote: $out"
+        rclone_explain_failure "$out" "$remote"
+        rc=1
+    fi
+
+    timeout "$timeout_s" rclone --config "$(get_rclone_config)" deletefile "$probe_remote" >/dev/null 2>&1 \
+        || hedgii_log "WARN" "Could not delete probe file $probe_remote"
+    rm -f "$probe_local"
+    return $rc
+}
+
+# Test the configured rclone remote (exact name + write access)
+test_rclone_remote() {
+    local remote cfg
+    remote=$(get_rclone_remote)
+    cfg=$(get_rclone_config)
+    migrate_rclone_config
+
+    if [[ ! -f "$cfg" ]]; then
+        hedgii_log "ERROR" "rclone config not found: $cfg"
+        hedgii_log "INFO" "Run: sudo hedgii setup-rclone"
+        return 1
+    fi
+    if ! rclone_remote_exists "$remote"; then
+        hedgii_log "ERROR" "rclone remote '${remote%%:*}' not found in $cfg"
+        hedgii_log "INFO" "Available remotes: $(hedgii_rclone listremotes 2>/dev/null | tr '\n' ' ')"
+        hedgii_log "INFO" "Run: sudo hedgii setup-rclone"
+        return 1
+    fi
+    hedgii_log "INFO" "Testing write access on $remote (timeout $(get_rclone_timeout)s)..."
+    if rclone_write_test "$remote"; then
+        hedgii_log "INFO" "✅ rclone remote $remote is readable and writable"
+        return 0
+    fi
+    return 1
+}
+
+# Guided rclone setup (headless friendly)
+setup_rclone() {
+    local cfg
+    cfg=$(get_rclone_config)
+    if ! command -v rclone >/dev/null 2>&1; then
+        hedgii_log "ERROR" "rclone not installed"
+        return 1
+    fi
+    migrate_rclone_config
+    mkdir -p "$(dirname "$cfg")"
+
+    hedgii_log "KAWAII" "🔧 rclone setup (config: $cfg)"
+    echo ""
+    echo "On a server WITHOUT a browser (headless):"
+    echo "  1. In 'rclone config', answer 'n' to \"Use auto config?\""
+    echo "  2. On a machine WITH a browser, run:  rclone authorize \"drive\"   (or \"onedrive\")"
+    echo "  3. Paste the resulting token back into this terminal"
+    echo "Name the remote like settings.rclone_remote (currently: $(get_rclone_remote))"
+    echo ""
+
+    rclone config --config "$cfg"
+    if [[ -f "$cfg" ]]; then
+        chown root:root "$cfg" 2>/dev/null || true
+        chmod 600 "$cfg"
+    fi
+    test_rclone_remote
+}
+
 # Setup OneDrive client (abraunegg) - FIXED VERSION
 setup_onedrive_client() {
     hedgii_log "KAWAII" "🔄 Setting up OneDrive client (abraunegg)..."
@@ -331,13 +493,16 @@ upload_with_onedrive() {
 # Upload using rclone
 upload_with_rclone() {
     local encrypted_file="$1"
-    local rclone_remote=$(jq -r '.settings.rclone_remote // "onedrive:hedgii-backups/"' "$CONFIG_FILE")
+    local rclone_remote=$(get_rclone_remote)
 
     hedgii_log "INFO" "📤 Uploading with rclone..."
+    if [[ "$(get_rclone_config)" == "$RCLONE_LEGACY_CONFIG" ]]; then
+        hedgii_log "WARN" "Using legacy rclone config $RCLONE_LEGACY_CONFIG; migrate with: sudo hedgii setup-rclone"
+    fi
 
-    # Check if rclone remote is configured
-    if ! rclone listremotes | grep -q "$(echo "$rclone_remote" | cut -d: -f1)"; then
-        hedgii_log "ERROR" "rclone remote not configured: $rclone_remote"
+    # Check if rclone remote is configured (exact match)
+    if ! rclone_remote_exists "$rclone_remote"; then
+        hedgii_log "ERROR" "rclone remote not configured: $rclone_remote (config: $(get_rclone_config))"
         return 1
     fi
 
@@ -346,19 +511,21 @@ upload_with_rclone() {
     for attempt in $(seq 1 $max_attempts); do
         hedgii_log "INFO" "Upload attempt $attempt/$max_attempts..."
 
-        if rclone copy "$encrypted_file" "$rclone_remote" --progress --transfers=1; then
+        local out
+        if out=$(hedgii_rclone copy "$encrypted_file" "$rclone_remote" --transfers=1 2>&1); then
             hedgii_log "INFO" "✅ rclone upload completed successfully"
 
             # Verify upload
             local filename=$(basename "$encrypted_file")
-            if rclone ls "$rclone_remote$filename" >/dev/null 2>&1; then
+            if hedgii_rclone ls "${rclone_remote%/}/$filename" >/dev/null 2>&1; then
                 hedgii_log "INFO" "Upload verified on remote"
                 return 0
             else
                 hedgii_log "WARN" "Upload verification failed"
             fi
         else
-            hedgii_log "WARN" "Upload attempt $attempt failed"
+            hedgii_log "WARN" "Upload attempt $attempt failed: $out"
+            rclone_explain_failure "$out" "$rclone_remote"
         fi
 
         if [[ $attempt -lt $max_attempts ]]; then
@@ -374,7 +541,11 @@ upload_with_rclone() {
 # Smart upload function that chooses the best method
 smart_upload_to_cloud() {
     local encrypted_file="$1"
-    local sync_method=$(get_sync_method)
+    local sync_method
+    if ! sync_method=$(get_sync_method); then
+        hedgii_log "ERROR" "Could not determine sync method: ${sync_method:-see previous error}"
+        return 1
+    fi
 
     hedgii_log "KAWAII" "🌥️ Using sync method: $sync_method"
 
@@ -415,16 +586,19 @@ test_sync_clients() {
 
     hedgii_log "INFO" "Available sync clients: ${available_clients[*]}"
 
+    local rclone_failed=0
     # Test each available client
     for client in "${available_clients[@]}"; do
         case "$client" in
             "rclone")
                 hedgii_log "INFO" "Testing rclone..."
                 if rclone version >/dev/null 2>&1; then
-                    local remotes=$(rclone listremotes 2>/dev/null | wc -l)
-                    hedgii_log "INFO" "✅ rclone working ($remotes remotes configured)"
+                    if ! test_rclone_remote; then
+                        rclone_failed=1
+                    fi
                 else
                     hedgii_log "WARN" "⚠️ rclone has issues"
+                    rclone_failed=1
                 fi
                 ;;
             "onedrive")
@@ -444,6 +618,8 @@ test_sync_clients() {
                 ;;
         esac
     done
+
+    return $rclone_failed
 }
 
 # Exclusive lock: only one hedgii run at a time (exit code 5 if already running)
@@ -860,7 +1036,7 @@ prune_remote() {
             local args=(--min-age "${days}d" --include 'hedgii_backup_*')
             [[ "$mode" == "dry-run" ]] && args+=(--dry-run)
             hedgii_log "INFO" "Remote retention: deleting backups older than ${days} days on $remote"
-            rclone delete "$remote" "${args[@]}" || hedgii_log "WARN" "Remote retention failed"
+            hedgii_rclone delete "$remote" "${args[@]}" || hedgii_log "WARN" "Remote retention failed"
             ;;
         *)
             hedgii_log "WARN" "remote_keep_days is not supported with the OneDrive client; ignoring"
@@ -1017,7 +1193,7 @@ setup_sync_wizard() {
 
     # Setup rclone if chosen or available
     if [[ "$sync_method" == "rclone" ]] || [[ "$sync_method" == "auto" && " ${available_clients[*]} " =~ " rclone " ]]; then
-        hedgii_log "INFO" "Configure rclone with: rclone config"
+        setup_rclone || hedgii_log "WARN" "rclone setup incomplete, re-run: sudo hedgii setup-rclone"
     fi
 
     hedgii_log "KAWAII" "✨ Sync setup completed!"
@@ -1262,7 +1438,7 @@ cmd_sync_status() {
     for client in "${available_clients[@]:-}"; do
         case "$client" in
             "rclone")
-                remotes=$(rclone listremotes 2>/dev/null | wc -l)
+                remotes=$(hedgii_rclone listremotes 2>/dev/null | wc -l)
                 hedgii_log "INFO" "rclone: $remotes remotes configured"
                 ;;
             "onedrive")
@@ -1298,7 +1474,10 @@ case "${1:-curl}" in
         ;;
     "test-sync")
         hedgii_log "KAWAII" "🧪 Testing sync clients..."
-        test_sync_clients
+        test_sync_clients || exit 1
+        ;;
+    "setup-rclone")
+        setup_rclone || exit 1
         ;;
     "setup-sync")
         hedgii_log "KAWAII" "🔧 Setting up sync configuration..."
@@ -1335,6 +1514,7 @@ case "${1:-curl}" in
         echo "🔄 Sync Commands:"
         echo "  test-sync         - Test available sync clients"
         echo "  setup-sync        - Interactive sync setup wizard"
+        echo "  setup-rclone      - Guided rclone setup + write test"
         echo "  setup-onedrive    - Setup OneDrive client specifically"
         echo "  sync-status       - Show sync clients status"
         ;;

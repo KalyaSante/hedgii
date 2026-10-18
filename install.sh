@@ -411,7 +411,9 @@ setup_configuration() {
     "backup_dir": "/var/backups/hedgii",
     "encrypt_passphrase_file": "/etc/hedgii/gpg_passphrase",
     "compression_format": "zip",
-    "rclone_remote": "onedrive:hedgii-backups/"
+    "rclone_remote": "onedrive:hedgii-backups/",
+    "rclone_config": "/etc/hedgii/rclone.conf",
+    "rclone_timeout": 60
   },
   "exclusions": [
     "*.tmp",
