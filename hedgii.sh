@@ -91,6 +91,10 @@ hedgii_log() {
 # Check dependencies
 check_dependencies() {
     local deps=("jq" "gpg" "rsync")
+    # Direct mode decodes rsync's file list with perl (perl-base is essential on Debian)
+    if [[ "$(jq -r '.settings.staging_mode // "copy"' "$CONFIG_FILE" 2>/dev/null)" == "direct" ]]; then
+        deps+=("perl")
+    fi
     local compression_format=$(jq -r '.settings.compression_format // "tar.gz"' "$CONFIG_FILE" 2>/dev/null || echo "tar.gz")
 
     # Ajouter zip aux dépendances si nécessaire
@@ -689,12 +693,13 @@ build_rsync_excludes() {
 }
 
 # Dry run of a directory source with its exclusions: prints the total size in bytes.
-# With $3, also writes the itemized list ("%i|%n" lines) there.
+# With $3, also writes the itemized list ("%i|%n" lines) there. -8 keeps non-ASCII bytes as
+# they are; control characters (newline...) are still written as \#ooo, decoded by the caller.
 source_dry_run() {
     local source="$1" index="$2" list_file="${3:-/dev/null}" empty out
     build_rsync_excludes "$index"
     empty=$(mktemp -d)
-    if ! out=$(LC_ALL=C rsync -a --dry-run --stats --out-format='%i|%n' \
+    if ! out=$(LC_ALL=C rsync -a -8 --dry-run --stats --out-format='%i|%n' \
         ${RSYNC_EXCLUDES[@]+"${RSYNC_EXCLUDES[@]}"} "$source/" "$empty/" 2>>"$LOG_FILE"); then
         rmdir "$empty"
         return 1
@@ -796,9 +801,34 @@ stage_direct_source() {
         return 1
     fi
     ln -s "$(realpath "$source")" "$staging_dir/$dest_relative"
-    cut -d'|' -f2- "$items" | awk -v d="$dest_relative" '$0 != "./" { print d "/" $0 }' \
-        > "$lists_dir/$source_index.list"
-    DIRECT_FILES=$((DIRECT_FILES + $(grep -c '^>f' "$items" || true)))
+
+    # NUL-separated list of "./<dest>/<name>": decodes rsync's \#ooo escapes, skips sockets,
+    # FIFOs and devices (tar can't archive them usefully), and counts regular files for the report.
+    # zip -@ reads one name per line: with zip, names containing a newline can't be archived.
+    local drop_newlines=0 counts files dropped
+    [[ "$(jq -r '.settings.compression_format // "tar.gz"' "$CONFIG_FILE")" == "zip" ]] && drop_newlines=1
+    counts=$(perl -e '
+        my ($dest, $drop_nl, $out) = @ARGV;
+        open(my $fh, ">", $out) or die "$out: $!";
+        my ($files, $dropped) = (0, 0);
+        while (my $line = <STDIN>) {
+            chomp $line;
+            my ($item, $name) = split /\|/, $line, 2;
+            next unless defined $name && $name ne "./";
+            my $type = substr($item, 1, 1);
+            next if $type eq "S" || $type eq "D";
+            $name =~ s/\\#([0-7]{3})/chr(oct($1))/ge;
+            if ($drop_nl && $name =~ /\n/) { $dropped++; next; }
+            $files++ if $type eq "f";
+            print $fh "./$dest/$name\0";
+        }
+        print "$files $dropped\n";
+    ' "$dest_relative" "$drop_newlines" "$lists_dir/$source_index.list" < "$items") || return 1
+    read -r files dropped <<<"$counts"
+    if [[ "$dropped" -gt 0 ]]; then
+        hedgii_log "ERROR" "  $dropped file name(s) with a newline skipped in $source: ZIP can't store them in direct mode, use tar.gz or copy mode"
+    fi
+    DIRECT_FILES=$((DIRECT_FILES + files))
     DIRECT_BYTES=$((DIRECT_BYTES + ${bytes:-0}))
     rm -f "$items"
 }
@@ -1066,35 +1096,54 @@ encrypt_staging() {
     local file_list=""
     if [[ -d "$staging_dir.lists" ]]; then
         file_list="$staging_dir.lists/archive.files"   # not *.list: read by the glob below
-        # "./" prefix: same member names as the recursive tar of copy mode (zip strips it)
-        { (cd "$staging_dir" && find . -mindepth 1 ! -type l)
-          sed 's|^|./|' "$staging_dir.lists/"*.list; } > "$file_list"
+        # NUL-separated, "./" prefix: same member names as the recursive tar of copy mode
+        { (cd "$staging_dir" && find . -mindepth 1 ! -type l -print0)
+          cat "$staging_dir.lists/"*.list; } > "$file_list"
     fi
 
-    local rc=0
-    set -o pipefail
+    local archiver
+    local -a status=()
+    # PIPESTATUS tells which side failed. The { } || true keeps set -e from exiting before it is read.
     if [[ "$archive_extension" == "zip" ]]; then
+        archiver="zip"
         hedgii_log "INFO" "🦔 Creating ZIP archive for Windows compatibility..." >&2
-        if [[ -n "$file_list" ]]; then
-            (cd "$staging_dir" && zip -q - -@ < "$file_list" 2>>"$LOG_FILE")
-        else
+        { if [[ -n "$file_list" ]]; then
+            (cd "$staging_dir" && tr '\0' '\n' < "$file_list" | zip -q - -@ 2>>"$LOG_FILE")
+          else
             (cd "$staging_dir" && zip -q -r - . 2>>"$LOG_FILE")
-        fi | gpg --symmetric --cipher-algo AES256 --batch --yes \
+          fi | gpg --symmetric --cipher-algo AES256 --batch --yes \
                 --passphrase-file "$passphrase_file" \
-                --output "$encrypted_file" 2>>"$LOG_FILE" || rc=$?
+                --output "$encrypted_file" 2>>"$LOG_FILE"
+          status=("${PIPESTATUS[@]}"); } || true
     else
+        archiver="tar"
         hedgii_log "INFO" "🦔 Creating TAR.GZ archive..." >&2
-        if [[ -n "$file_list" ]]; then
-            tar -czf - -C "$staging_dir" --no-recursion --verbatim-files-from -T "$file_list" 2>>"$LOG_FILE"
-        else
+        { if [[ -n "$file_list" ]]; then
+            tar -czf - -C "$staging_dir" --no-recursion --null --verbatim-files-from -T "$file_list" 2>>"$LOG_FILE"
+          else
             tar -czf - -C "$staging_dir" . 2>>"$LOG_FILE"
-        fi | gpg --symmetric --cipher-algo AES256 --batch --yes \
+          fi | gpg --symmetric --cipher-algo AES256 --batch --yes \
                 --passphrase-file "$passphrase_file" \
-                --output "$encrypted_file" 2>>"$LOG_FILE" || rc=$?
+                --output "$encrypted_file" 2>>"$LOG_FILE"
+          status=("${PIPESTATUS[@]}"); } || true
     fi
 
-    if [[ $rc -ne 0 ]]; then
-        hedgii_log "ERROR" "Encryption failed (exit code $rc), see log for details" >&2
+    local archive_rc="${status[0]:-1}" gpg_rc="${status[1]:-1}"
+    # tar exits 1 when a file changed while it was read (live data in direct mode): the archive
+    # is complete and valid, the file is just not a consistent snapshot
+    if [[ "$archiver" == "tar" && "$archive_rc" -eq 1 ]]; then
+        hedgii_log "WARN" "Some files changed while they were archived (tar exit code 1), see log" >&2
+        archive_rc=0
+    fi
+    # gpg first: when gpg dies, the archiver fails too on the broken pipe. The reverse doesn't
+    # happen (gpg just sees the end of a truncated stream), so a failed archiver means its own error.
+    if [[ "$gpg_rc" -ne 0 ]]; then
+        hedgii_log "ERROR" "Encryption failed (gpg exit code $gpg_rc), see log for details" >&2
+        rm -f "$encrypted_file"
+        return 1
+    fi
+    if [[ "$archive_rc" -ne 0 ]]; then
+        hedgii_log "ERROR" "Archive creation failed ($archiver exit code $archive_rc), see log for details" >&2
         rm -f "$encrypted_file"
         return 1
     fi

@@ -83,6 +83,45 @@ check "direct-tar: internal symlink kept as a symlink" test -L "$TMP/restore-dir
 check "direct mode: report counts the source files" grep -q '^Total files: 4$' "$TMP/restore-direct-tar/hedgii_backup_report.txt"
 rm -f "$SRC1/link-to-first"
 
+# Direct mode with non-ASCII, spaces, backslash escapes and newlines in names; sockets skipped (#30)
+INTL="$SRC2/intl"
+mkdir -p "$INTL"
+names=("logo_carré.png" "über.txt" "日本.txt" "with space.txt" 'back\#123slash.txt')
+for n in "${names[@]}"; do echo "$n" > "$INTL/$n"; done
+nl_name=$'new\nline.txt'
+echo "newline" > "$INTL/$nl_name"
+python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$INTL/app.sock"
+for fmt in tar.gz zip; do
+    write_config "$fmt" "test:$REMOTE/" '.settings.staging_mode = "direct"'
+    : > "$HEDGII_LOG_FILE"
+    rc=0; hedgii curl || rc=$?
+    check "direct $fmt, special names: curl exits 0 (got $rc)" test "$rc" -eq 0
+    archive=$(newest_archive "$fmt")
+    out="$TMP/restore-intl-$fmt"
+    bash "$ROOT/scripts/decrypt.sh" --passphrase-file "$TMP/passphrase" "$archive" "$out" >>"$TMP/run.out" 2>&1
+    for n in "${names[@]}"; do
+        check "direct $fmt: '$n' restored" test -f "$out/second/intl/$n"
+    done
+    check "direct $fmt, special names: verify finds every file" hedgii verify --local --archive "$(basename "$archive")"
+    check "direct $fmt: sockets skipped without tar/zip warnings" bash -c '! grep -qi "socket" "$1"' _ "$HEDGII_LOG_FILE"
+done
+check "direct tar.gz: name with a newline restored" test -f "$TMP/restore-intl-tar.gz/second/intl/$nl_name"
+check "direct zip: name with a newline reported as skipped" grep -q "with a newline skipped" "$TMP/run.out"
+rm -rf "$INTL"
+
+# The failing side of the archive | gpg pipeline is named (#30)
+mkdir -p "$TMP/fakebin"
+printf '#!/bin/sh\nexit 2\n' > "$TMP/fakebin/tar"
+chmod +x "$TMP/fakebin/tar"
+write_config tar.gz "test:$REMOTE/"
+rc=0; PATH="$TMP/fakebin:$PATH" bash "$ROOT/hedgii.sh" curl >>"$TMP/run.out" 2>&1 || rc=$?
+check "tar failure exits 3 (got $rc)" test "$rc" -eq 3
+check "tar failure reported as a tar failure" grep -q "Archive creation failed (tar exit code 2)" "$TMP/run.out"
+write_config tar.gz "test:$REMOTE/" '.settings.encrypt_passphrase_file = "/nonexistent/passphrase"'
+rc=0; hedgii curl || rc=$?
+check "gpg failure exits 3 (got $rc)" test "$rc" -eq 3
+check "gpg failure reported as a gpg failure" grep -q "Encryption failed (gpg exit code 2)" "$TMP/run.out"
+
 # Not enough free space: stops before copying anything, with sizes in the message
 write_config tar.gz "test:$REMOTE/" '.settings.min_free_space_ratio = 1e18'
 before=$(find "$BACKUPS" -name 'hedgii_backup_*.gpg' | wc -l)

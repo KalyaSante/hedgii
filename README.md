@@ -353,7 +353,7 @@ Control Hedgii's behavior and sync options:
 
 - `staging_mode` *(string, optional)*: How directory sources reach the archive
   - **`"copy"`** (default): copied to staging with rsync, then archived. Needs the size of the sources twice on disk while the run lasts (staging + archive)
-  - **`"direct"`**: archived in place, without a copy. Staging only holds the custom command outputs and single files. Exclusions behave the same (the file list comes from an rsync dry run). Files are read while the services keep writing them, exactly as rsync would in copy mode
+  - **`"direct"`**: archived in place, without a copy. Staging only holds the custom command outputs and single files. Exclusions behave the same (the file list comes from an rsync dry run). Files are read while the services keep writing them, exactly as rsync would in copy mode. Needs `perl` (to decode rsync's file list). Sockets, FIFOs and devices are skipped. With `"zip"`, file names containing a newline can't be stored and are skipped with an error (use `tar.gz`)
 
 - `min_free_space_ratio` *(number, optional)*: Free space margin checked before a run
   - Default: `1.2`. `0` disables the check
