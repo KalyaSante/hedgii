@@ -4,6 +4,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 export HEDGII_LOG_FILE="$TMP/hedgii.log"
+export HEDGII_LOCK_FILE="$TMP/hedgii.lock"
 fail=0
 check() { # name expected_rc cmd...
     local name="$1" want="$2"; shift 2
