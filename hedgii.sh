@@ -6,9 +6,9 @@
 set -euo pipefail
 
 # Configuration
-CONFIG_FILE="/etc/hedgii/hedgii_config.json"
+CONFIG_FILE="${HEDGII_CONFIG_FILE:-/etc/hedgii/hedgii_config.json}"
 DATE=$(date +%Y%m%d_%H%M%S)
-LOG_FILE="/var/log/hedgii/hedgii_$DATE.log"
+LOG_FILE="${HEDGII_LOG_FILE:-/var/log/hedgii/hedgii_$DATE.log}"
 
 # Create log directory
 mkdir -p "$(dirname "$LOG_FILE")"
@@ -1028,6 +1028,55 @@ hedgii_change_passphrase() {
     hedgii_log "KAWAII" "Remember: A secure hedgehog is a happy hedgehog! 🦔🔐"
 }
 
+cmd_test_commands() {
+    hedgii_log "KAWAII" "🦔 Testing custom commands without full backup..."
+    local staging_dir
+    staging_dir=$(cleanup_staging)
+    execute_custom_commands "$staging_dir"
+    hedgii_log "INFO" "Check results in: $staging_dir"
+}
+
+cmd_validate_config() {
+    hedgii_log "INFO" "🔍 Validating configuration..."
+    if jq empty "$CONFIG_FILE" 2>/dev/null; then
+        hedgii_log "INFO" "✓ Configuration JSON is valid"
+        local custom_count source_count
+        custom_count=$(jq '.custom_commands | length' "$CONFIG_FILE")
+        source_count=$(jq '.backup_sources | length' "$CONFIG_FILE")
+        hedgii_log "INFO" "📊 Found $custom_count custom commands, $source_count file sources"
+    else
+        hedgii_log "ERROR" "✗ Configuration JSON is invalid"
+        return 1
+    fi
+}
+
+cmd_sync_status() {
+    hedgii_log "INFO" "📊 Sync clients status:"
+    local available_clients=($(detect_sync_clients))
+    local sync_method
+    sync_method=$(get_sync_method 2>/dev/null) || sync_method="none"
+
+    hedgii_log "INFO" "Available clients: ${available_clients[*]:-}"
+    hedgii_log "INFO" "Current method: $sync_method"
+
+    local client remotes
+    for client in "${available_clients[@]:-}"; do
+        case "$client" in
+            "rclone")
+                remotes=$(rclone listremotes 2>/dev/null | wc -l)
+                hedgii_log "INFO" "rclone: $remotes remotes configured"
+                ;;
+            "onedrive")
+                if [[ -f "/etc/hedgii/onedrive/config" ]]; then
+                    hedgii_log "INFO" "OneDrive: configured"
+                else
+                    hedgii_log "INFO" "OneDrive: not configured"
+                fi
+                ;;
+        esac
+    done
+}
+
 # Command handling with enhanced multi-sync support
 case "${1:-curl}" in
     "curl")
@@ -1041,22 +1090,10 @@ case "${1:-curl}" in
         hedgii_log "INFO" "Hedgii is guarding your data 24/7! 🛡️"
         ;;
     "test-commands")
-        hedgii_log "KAWAII" "🦔 Testing custom commands without full backup..."
-        local staging_dir=$(cleanup_staging)
-        execute_custom_commands "$staging_dir"
-        hedgii_log "INFO" "Check results in: $staging_dir"
+        cmd_test_commands
         ;;
     "validate-config")
-        hedgii_log "INFO" "🔍 Validating configuration..."
-        if jq empty "$CONFIG_FILE" 2>/dev/null; then
-            hedgii_log "INFO" "✓ Configuration JSON is valid"
-            local custom_count=$(jq '.custom_commands | length' "$CONFIG_FILE")
-            local source_count=$(jq '.backup_sources | length' "$CONFIG_FILE")
-            hedgii_log "INFO" "📊 Found $custom_count custom commands, $source_count file sources"
-        else
-            hedgii_log "ERROR" "✗ Configuration JSON is invalid"
-            exit 1
-        fi
+        cmd_validate_config
         ;;
     "test-sync")
         hedgii_log "KAWAII" "🧪 Testing sync clients..."
@@ -1071,28 +1108,7 @@ case "${1:-curl}" in
         setup_onedrive_client
         ;;
     "sync-status")
-        hedgii_log "INFO" "📊 Sync clients status:"
-        local available_clients=($(detect_sync_clients))
-        local sync_method=$(get_sync_method)
-
-        hedgii_log "INFO" "Available clients: ${available_clients[*]}"
-        hedgii_log "INFO" "Current method: $sync_method"
-
-        for client in "${available_clients[@]}"; do
-            case "$client" in
-                "rclone")
-                    local remotes=$(rclone listremotes 2>/dev/null | wc -l)
-                    hedgii_log "INFO" "rclone: $remotes remotes configured"
-                    ;;
-                "onedrive")
-                    if [[ -f "/etc/hedgii/onedrive/config" ]]; then
-                        hedgii_log "INFO" "OneDrive: configured"
-                    else
-                        hedgii_log "INFO" "OneDrive: not configured"
-                    fi
-                    ;;
-            esac
-        done
+        cmd_sync_status
         ;;
     "edit-config")
         hedgii_edit_config
