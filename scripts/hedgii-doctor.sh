@@ -303,7 +303,7 @@ test_sync_clients() {
 
         # Test the configured rclone remote (exact name, write probe)
         local rclone_cfg rclone_remote rclone_timeout remote_name
-        # Same resolution as hedgii.sh get_rclone_config (legacy root config for pre-1.5 installs)
+        # Same resolution as hedgii.sh get_rclone_config (legacy root config for older installs)
         rclone_cfg=$(jq -r '.settings.rclone_config // empty' "$CONFIG_FILE" 2>/dev/null || true)
         if [[ -z "$rclone_cfg" ]]; then
             rclone_cfg="/etc/hedgii/rclone.conf"

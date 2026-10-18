@@ -1,5 +1,7 @@
 # 🦔 Hedgii - Your Kawaii Backup Guardian
 
+[![CI](https://github.com/KalyaSante/hedgii/actions/workflows/ci.yml/badge.svg)](https://github.com/KalyaSante/hedgii/actions/workflows/ci.yml)
+
 <div align="center">
   <img src="https://img.shields.io/badge/Status-Protecting%20Your%20Data-brightgreen?style=for-the-badge&logo=data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjQiIGhlaWdodD0iMjQiIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTEyIDJMMTMuMDkgOC4yNkwyMCA5TDEzLjA5IDE1Ljc0TDEyIDIyTDEwLjkxIDE1Ljc0TDQgOUwxMC45MSA4LjI2TDEyIDJaIiBmaWxsPSJjdXJyZW50Q29sb3IiLz4KPC9zdmc+Cg=="/>
   <img src="https://img.shields.io/badge/Made%20with-Bash%20%26%20Love-ff69b4?style=for-the-badge"/>
@@ -265,7 +267,7 @@ Execute commands to capture database dumps, system state, and more:
 - `output_file` *(string, required)*: Relative path where command output is saved
 - `timeout` *(integer, optional)*: Maximum execution time in seconds (default: 300)
 - `working_dir` *(string, optional)*: Directory to execute command in (default: "/tmp")
-- `continue_on_error` *(boolean, optional)*: Whether to continue backup if command fails (default: true). Before 1.5 an explicit `false` was silently ignored; it is now honored, so a failing blocking command (e.g. `mysqldump` on a server without MySQL) stops the backup with exit code 2
+- `continue_on_error` *(boolean, optional)*: Whether to continue backup if command fails (default: true). Older versions silently ignored an explicit `false`; it is now honored, so a failing blocking command (e.g. `mysqldump` on a server without MySQL) stops the backup with exit code 2
 - `require_output` *(boolean, optional)*: Fail the command if stdout is empty (default: true when `output_file` ends with `.sql`, `.dump` or `.archive`, otherwise false). Only stdout is written to `output_file`; stderr is logged (last 20 lines) and never mixed into the dump
 - `stderr_file` *(string, optional)*: Relative path in the archive where the command's stderr is kept
 

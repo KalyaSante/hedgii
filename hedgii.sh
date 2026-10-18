@@ -152,7 +152,7 @@ get_sync_method() {
 RCLONE_DEFAULT_CONFIG="/etc/hedgii/rclone.conf"
 RCLONE_LEGACY_CONFIG="/root/.config/rclone/rclone.conf"
 
-# Explicit settings.rclone_config wins. Without it, installs made before 1.5 keep working on
+# Explicit settings.rclone_config wins. Without it, older installs keep working on
 # root's own rclone config until it is migrated to /etc/hedgii/rclone.conf.
 get_rclone_config() {
     local cfg
