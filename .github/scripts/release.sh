@@ -1,6 +1,7 @@
 #!/bin/bash
 # Creates a GitHub release (and its tag) for every version bump on the first-parent history of
-# HEAD that has no tag yet: the commit where ./version changed gets "v<version>". Run by CI on
+# HEAD that has no tag yet: the commit where ./version changed gets "v<version>" (or "V<version>",
+# like the latest existing tag). Run by CI on
 # pushes to master; it is idempotent, so a failed or skipped run is caught up by the next one.
 # Needs the full history with tags (actions/checkout fetch-depth: 0) and GH_TOKEN for gh.
 set -euo pipefail
@@ -10,8 +11,12 @@ repo_url="${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:-KalyaSan
 # Only bumps after the newest existing release tag (older versions were never released)
 # prev: tag of the previous release (compare link); prev_ref: its commit (tags created by gh
 # below exist on GitHub only, not in this checkout)
-prev=$(git describe --tags --abbrev=0 --match 'v[0-9]*' HEAD 2>/dev/null || true)
+prev=$(git describe --tags --abbrev=0 --match '[vV][0-9]*' HEAD 2>/dev/null || true)
 prev_ref="$prev"
+# Tags have been made both as v1.4.2 and V2.0.0: new ones follow the latest, and a version
+# counts as released whatever the case of its prefix
+prefix="${prev:0:1}"
+prefix="${prefix:-v}"
 range="${prev:+$prev..}HEAD"
 
 created=0
@@ -22,9 +27,11 @@ while read -r commit; do
         echo "Skipping $commit: invalid version '$version'"
         continue
     fi
-    tag="v$version"
-    if git rev-parse -q --verify "refs/tags/$tag" >/dev/null || gh release view "$tag" >/dev/null 2>&1; then
-        echo "$tag already released"
+    tag="$prefix$version"
+    if git rev-parse -q --verify "refs/tags/v$version" >/dev/null \
+        || git rev-parse -q --verify "refs/tags/V$version" >/dev/null \
+        || gh release view "v$version" >/dev/null 2>&1 || gh release view "V$version" >/dev/null 2>&1; then
+        echo "$version already released"
         prev="$tag"
         prev_ref="$commit"
         continue
