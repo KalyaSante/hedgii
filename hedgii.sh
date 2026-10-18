@@ -734,7 +734,10 @@ encrypt_staging() {
         return 1
     fi
 
-    if [[ ! -s "$encrypted_file" ]] || ! gpg --list-packets "$encrypted_file" >/dev/null 2>>"$LOG_FILE"; then
+    # Full decryption to /dev/null: checks the MDC over the whole file and proves the passphrase works
+    # (--list-packets alone needs the passphrase for symmetric files and fails in batch mode)
+    if [[ ! -s "$encrypted_file" ]] || ! gpg --batch --quiet --passphrase-file "$passphrase_file" \
+        --decrypt "$encrypted_file" >/dev/null 2>>"$LOG_FILE"; then
         hedgii_log "ERROR" "Encrypted file is missing, empty or not a valid GPG file" >&2
         rm -f "$encrypted_file"
         return 1
