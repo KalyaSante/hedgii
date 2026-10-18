@@ -988,6 +988,12 @@ Hedgii welcomes contributions from fellow kawaii coding enthusiasts! (≧◡≦)
 4. Push to the branch (`git push origin feature/amazing-feature`)
 5. Open a Pull Request
 
+### **Releases**
+Releases are automatic: bump `version` (`build: vX.Y.Z` on `dev`), merge into `master`, and once
+CI is green the `Release` job tags the merge commit `vX.Y.Z` and publishes a GitHub release with
+the commit list since the previous one. Pushes to `master` that don't change `version` release
+nothing, and any version bump left without a release is caught up by the next run.
+
 ### **Development Setup**
 ```bash
 git clone https://github.com/your-username/hedgii.git
