@@ -113,19 +113,35 @@
       "continue_on_error": true
     }
   ],
+  "retention": {
+    "local_keep_last": 3,
+    "local_keep_days": 7,
+    "remote_keep_days": 0
+  },
+
   "settings": {
     "staging_dir": "/tmp/hedgii_staging",
     "backup_dir": "/var/backups/hedgii",
     "encrypt_passphrase_file": "/etc/hedgii/gpg_passphrase",
     "compression_format": "zip",
+    "staging_mode": "copy",
+    "min_free_space_ratio": 1.2,
 
     "sync_method": "auto",
     "cloud_provider": "onedrive",
 
     "rclone_remote": "onedrive:hedgii-backups/",
+    "rclone_config": "/etc/hedgii/rclone.conf",
+    "rclone_timeout": 60,
 
     "onedrive_backup_dir": "hedgii-backups",
     "onedrive_config_dir": "/etc/hedgii/onedrive"
+  },
+  "notifications": {
+    "on": ["failure", "warning"],
+    "discord_webhook": "",
+    "telegram": { "bot_token_file": "/etc/hedgii/telegram_token", "chat_id": "" },
+    "ping_url": ""
   },
   "exclusions": [
     "*.tmp",

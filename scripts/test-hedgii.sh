@@ -58,7 +58,7 @@ test_script_syntax() {
                 test_log "INFO" "  ✓ Syntax OK"
             else
                 test_log "ERROR" "  ✗ Syntax error in $script"
-                ((syntax_errors++))
+                syntax_errors=$((syntax_errors + 1))
             fi
         else
             test_log "WARN" "  Script $script not found"
@@ -111,7 +111,7 @@ test_dependencies() {
     for dep in "${deps[@]}"; do
         if command -v "$dep" >/dev/null 2>&1; then
             test_log "INFO" "  ✓ $dep available"
-            ((available++))
+            available=$((available + 1))
         else
             test_log "WARN" "  ⚠ $dep not available"
         fi
@@ -145,7 +145,7 @@ test_file_structure() {
             test_log "INFO" "  ✓ $file present"
         else
             test_log "WARN" "  ⚠ $file missing"
-            ((missing_files++))
+            missing_files=$((missing_files + 1))
         fi
     done
     

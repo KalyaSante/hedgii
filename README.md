@@ -1,5 +1,7 @@
 # 🦔 Hedgii - Your Kawaii Backup Guardian
 
+[![CI](https://github.com/KalyaSante/hedgii/actions/workflows/ci.yml/badge.svg)](https://github.com/KalyaSante/hedgii/actions/workflows/ci.yml)
+
 <div align="center">
   <img src="https://img.shields.io/badge/Status-Protecting%20Your%20Data-brightgreen?style=for-the-badge&logo=data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjQiIGhlaWdodD0iMjQiIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTEyIDJMMTMuMDkgOC4yNkwyMCA5TDEzLjA5IDE1Ljc0TDEyIDIyTDEwLjkxIDE1Ljc0TDQgOUwxMC45MSA4LjI2TDEyIDJaIiBmaWxsPSJjdXJyZW50Q29sb3IiLz4KPC9zdmc+Cg=="/>
   <img src="https://img.shields.io/badge/Made%20with-Bash%20%26%20Love-ff69b4?style=for-the-badge"/>
@@ -61,6 +63,8 @@ hedgii setup-sync
     
     // rclone settings
     "rclone_remote": "onedrive:hedgii-backups/",
+    "rclone_config": "/etc/hedgii/rclone.conf",  // used via --config for every rclone call
+    "rclone_timeout": 60,                        // seconds, for connection/write tests
     
     // OneDrive client settings
     "onedrive_backup_dir": "hedgii-backups",
@@ -68,6 +72,32 @@ hedgii setup-sync
   }
 }
 ```
+
+### **☁️ rclone Setup (headless servers)**
+
+Hedgii runs as root from cron and always passes `--config /etc/hedgii/rclone.conf`
+(`settings.rclone_config`, `root:root`, `chmod 600`), so cron and `sudo hedgii test-sync`
+use the same config. If only `/root/.config/rclone/rclone.conf` exists, Hedgii offers to copy it.
+
+```bash
+sudo hedgii setup-rclone   # runs rclone config, then a write/read/delete probe
+sudo hedgii test-sync      # re-test the configured remote (writes .hedgii-probe-<date>)
+```
+
+On a server without a browser, answer `n` to **"Use auto config?"**, then on a machine with a
+browser run `rclone authorize "drive"` (or `"onedrive"`) and paste the token back.
+
+**Google Drive**: create your own OAuth client (Google Cloud Console → APIs & Services →
+enable Drive API → OAuth consent screen → Credentials → OAuth client ID, type *Desktop app*)
+and give `client_id`/`client_secret` to `rclone config`. The shared rclone client is rate-limited.
+Move the consent screen from *Testing* to *In production*: apps in Testing mode have tokens that
+expire every 7 days and backups silently stop. The "app not verified" warning during
+authorization is expected for your own app.
+
+**OneDrive**: using your own `client_id` (Azure app registration) is recommended.
+
+If a token expires (`invalid_grant`, `token expired`, `401`), Hedgii prints:
+`rclone config reconnect <remote>: --config /etc/hedgii/rclone.conf`.
 
 ---
 
@@ -91,7 +121,7 @@ Hedgii isn't just another backup script - it's your kawaii guardian that protect
 - **Flexible JSON configuration** - no more hardcoded paths
 - **Intelligent error handling** with continue-on-error options
 - **Staging directory management** - clean and organized
-- **Automatic cleanup** of old backups
+- **Automatic cleanup** of old local backups (configurable `retention`, never deletes archives that were not uploaded)
 - **Interactive setup wizard** for sync clients
 - **Detailed logging** with kawaii emojis for easy reading
 
@@ -99,15 +129,19 @@ Hedgii isn't just another backup script - it's your kawaii guardian that protect
 
 ## 🚀 Quick Start
 
-### **One-liner Installation** (Coming Soon!)
+### **Installer**
 ```bash
-curl -fsSL https://raw.githubusercontent.com/damienmarill/hedgii/main/install.sh | sudo bash
+git clone https://github.com/KalyaSante/hedgii.git
+cd hedgii
+sudo ./install.sh   # dependencies, config, GPG passphrase, cron (backup + weekly verify)
 ```
+
+`install.sh` copies files from the checkout, so it can't be piped from `curl`.
 
 ### **Manual Installation**
 ```bash
 # Clone the kawaii repository
-git clone https://github.com/damienmarill/hedgii.git
+git clone https://github.com/KalyaSante/hedgii.git
 cd hedgii
 
 # Make hedgii executable
@@ -123,8 +157,8 @@ sudo cp config/hedgii_config.json.example /etc/hedgii/hedgii_config.json
 echo "your_super_secret_passphrase" | sudo tee /etc/hedgii/gpg_passphrase
 sudo chmod 600 /etc/hedgii/gpg_passphrase
 
-# Configure rclone for your cloud storage
-rclone config
+# Configure rclone for your cloud storage (writes /etc/hedgii/rclone.conf)
+sudo ./hedgii.sh setup-rclone
 ```
 
 ### **First Backup**
@@ -138,6 +172,20 @@ sudo ./hedgii.sh test-commands
 # Run your first backup! 🎉
 sudo ./hedgii.sh curl
 ```
+
+### **Exit Codes**
+`hedgii curl` ends with a one-line `SUMMARY` log (status, duration, size, destination) and one of these exit codes (`verify` uses 0, 1, 5 and 6):
+
+| Code | Meaning |
+| --- | --- |
+| 0 | Backup created and uploaded |
+| 1 | Configuration error or missing dependency |
+| 2 | Collection failure (source or blocking custom_command) |
+| 3 | Compression or encryption failure |
+| 4 | Upload failure (archive kept locally) |
+| 5 | Another run already in progress (`flock` on `/var/lock/hedgii.lock`, override with `HEDGII_LOCK_FILE`) |
+| 6 | `hedgii verify`: the archive could not be downloaded, decrypted or checked |
+| 7 | Not enough free space (see `min_free_space_ratio`), nothing was copied |
 
 ---
 
@@ -224,7 +272,9 @@ Execute commands to capture database dumps, system state, and more:
 - `output_file` *(string, required)*: Relative path where command output is saved
 - `timeout` *(integer, optional)*: Maximum execution time in seconds (default: 300)
 - `working_dir` *(string, optional)*: Directory to execute command in (default: "/tmp")
-- `continue_on_error` *(boolean, optional)*: Whether to continue backup if command fails (default: true)
+- `continue_on_error` *(boolean, optional)*: Whether to continue backup if command fails (default: true). Older versions silently ignored an explicit `false`; it is now honored, so a failing blocking command (e.g. `mysqldump` on a server without MySQL) stops the backup with exit code 2
+- `require_output` *(boolean, optional)*: Fail the command if stdout is empty (default: true when `output_file` ends with `.sql`, `.dump` or `.archive`, otherwise false). Only stdout is written to `output_file`; stderr is logged (last 20 lines) and never mixed into the dump
+- `stderr_file` *(string, optional)*: Relative path in the archive where the command's stderr is kept
 
 **Command Examples:**
 ```json
@@ -277,12 +327,38 @@ Control Hedgii's behavior and sync options:
 }
 ```
 
+#### **🧹 retention** - Backup Retention
+
+```json
+"retention": {
+  "local_keep_last": 3,
+  "local_keep_days": 7,
+  "remote_keep_days": 0
+}
+```
+
+- After a verified upload, the archive is marked with an `<archive>.uploaded` file.
+- Local purge deletes only *uploaded* archives beyond the newest `local_keep_last` **and** older than `local_keep_days`.
+- An archive that was never uploaded is **never** deleted automatically; it is reported as `WARN` at each run, by `hedgii peek` and `hedgii-doctor`.
+- `remote_keep_days` (`0` = disabled): with rclone, runs `rclone delete <remote> --min-age <N>d --include 'hedgii_backup_*'`. Not supported with the OneDrive client (a warning is logged).
+- The copy placed in the OneDrive sync folder is always removed after each run.
+- `hedgii prune [--dry-run]` applies the policy on demand; `hedgii peek` shows archive count and disk usage.
+
 #### **🗂️ Backup & Storage Settings**
 
 - `staging_dir` *(string, optional)*: Temporary directory for backup preparation
   - Default: `"/tmp/hedgii_staging"`
-  - Must be writable by hedgii user
-  - Cleaned up after each backup
+  - Used as a prefix: each run gets its own private `<staging_dir>.XXXXXX` directory
+  - Removed at the end of every run, failed or not
+
+- `staging_mode` *(string, optional)*: How directory sources reach the archive
+  - **`"copy"`** (default): copied to staging with rsync, then archived. Needs the size of the sources twice on disk while the run lasts (staging + archive)
+  - **`"direct"`**: archived in place, without a copy. Staging only holds the custom command outputs and single files. Exclusions behave the same (the file list comes from an rsync dry run). Files are read while the services keep writing them, exactly as rsync would in copy mode
+
+- `min_free_space_ratio` *(number, optional)*: Free space margin checked before a run
+  - Default: `1.2`. `0` disables the check
+  - Before collecting anything, Hedgii estimates the size of the sources (after exclusions) and stops with exit code 7 if staging (copy mode) or `backup_dir` has less than size × ratio available (both together when they share a filesystem). The archive is assumed incompressible
+  - A second check runs before archiving, with the real staging size (custom command outputs included)
 
 - `backup_dir` *(string, optional)*: Local directory for encrypted backup files
   - Default: `"/var/backups/hedgii"`
@@ -587,6 +663,15 @@ sudo hedgii curl
 # 👀 Check backup status
 sudo hedgii peek
 
+# 🧹 Apply retention policy (list only with --dry-run)
+sudo hedgii prune [--dry-run]
+
+# 🔍 Prove the latest backup is restorable (download, decrypt, test, compare with the report)
+sudo hedgii verify [--remote|--local] [--archive NAME]
+
+# 📣 Send a test message on every configured notification channel
+sudo hedgii test-notify
+
 # 🛡️ View protection status
 sudo hedgii guard
 
@@ -614,6 +699,9 @@ sudo hedgii test-sync
 
 # 🔧 Interactive sync setup wizard
 sudo hedgii setup-sync
+
+# ☁️ Guided rclone setup (headless OAuth) + write test
+sudo hedgii setup-rclone
 
 # 📤 Setup OneDrive client specifically
 sudo hedgii setup-onedrive
@@ -770,6 +858,52 @@ Hedgii can execute any shell command as part of your backup:
 
 ---
 
+## 🔔 Notifications
+
+Add a `notifications` block to your config (see `config/hedgii_config.json.example`):
+
+- `on`: levels that trigger a message (`failure`, `warning`, `success`)
+- `discord_webhook` (or `discord_webhook_file` to read it from a `chmod 600` file)
+- `telegram.bot_token_file` (`chmod 600`) and `telegram.chat_id`
+- `ping_url`: healthchecks.io / Uptime Kuma push URL (`/start`, success, `/fail`)
+
+Messages include host, duration, archive size, destination, exit code and last errors.
+A notification failure is logged as WARN and never fails the backup.
+Validate with `hedgii test-notify`.
+
+A successful run is reported as `warning` when it logged an `[ERROR]` (a non-blocking command
+failed, for instance) or when an older archive is still waiting to be uploaded.
+
+## ♻️ Restoring a Backup
+
+Archives are `hedgii_backup_YYYYMMDD_HHMMSS.{zip|tar.gz}.gpg`, in `backup_dir` and on the remote.
+`scripts/decrypt.sh` detects the format (from the name, or from the content).
+
+**On the server (Hedgii config present)**: the passphrase file comes from the config.
+```bash
+sudo ./scripts/decrypt.sh /var/backups/hedgii/hedgii_backup_20261018_020000.zip.gpg /tmp/restore
+```
+
+**On any other machine (no Hedgii config)**: fetch the archive, then give the passphrase file.
+```bash
+rclone copy onedrive:hedgii-backups/hedgii_backup_20261018_020000.zip.gpg .
+./scripts/decrypt.sh --passphrase-file ./passphrase hedgii_backup_20261018_020000.zip.gpg ./restored
+```
+
+Without the script: `gpg --decrypt FILE.gpg > archive`, then `unzip archive` or `tar -xzf archive`.
+`hedgii_backup_report.txt` at the root of the archive lists what it contains; databases are in
+the `output_file` paths of the custom commands (`databases/...`).
+
+## 🔍 Restore Tests
+
+`hedgii verify` takes the newest archive (from the rclone remote by default, `--local` for
+`backup_dir`, `--archive NAME` for a given one), decrypts it in a private temp dir next to
+`staging_dir`, runs `unzip -t` / `tar -t`, and checks that it holds at least as many files as its
+embedded `hedgii_backup_report.txt`. The temp dir is removed on every exit path, the result goes
+through the notifications, and it exits 6 on failure. The installer offers a weekly cron entry
+(`/etc/cron.d/hedgii-backup`). With the OneDrive client (upload-only), it checks the local archive.
+
+
 ## 📊 Monitoring & Reporting
 
 Every Hedgii backup includes:
@@ -805,12 +939,35 @@ sudo chmod 600 /etc/hedgii/gpg_passphrase
 sudo hedgii test-commands
 ```
 
-**❌ "rclone upload failed"**
+**❌ "rclone upload failed" / "rclone remote not configured"**
 ```bash
-# Test rclone configuration
-rclone ls onedrive:
-rclone config reconnect onedrive:
+# Tests the configured remote (exact name) with a write/read/delete probe
+sudo hedgii test-sync
+# Hedgii only reads settings.rclone_config (default /etc/hedgii/rclone.conf), not your user's rclone.conf
+sudo hedgii setup-rclone
+# "invalid_grant" / "token expired": refresh the OAuth token
+sudo rclone config reconnect onedrive: --config /etc/hedgii/rclone.conf
 ```
+A WARN "Using legacy rclone config /root/.config/rclone/rclone.conf" means the install predates
+`rclone_config`: run `sudo hedgii setup-rclone` once to move it. Google Drive tokens of an OAuth
+app left in "Testing" mode expire after 7 days (see the headless rclone section above).
+
+**❌ "Another Hedgii run is already in progress" (exit 5)**
+```bash
+# A backup or verify is running (or a stuck process holds /var/lock/hedgii.lock)
+pgrep -af hedgii
+```
+
+**❌ "Not enough free space" (exit 7)**
+```bash
+sudo hedgii prune --dry-run   # what retention would remove
+sudo hedgii peek              # archives, uploaded or not, and disk usage
+```
+Or set `"staging_mode": "direct"` to skip the staging copy, or lower `min_free_space_ratio`.
+
+**❌ "Archive never uploaded (kept)"**
+Hedgii never deletes an archive that was not uploaded. Re-upload it (`rclone copy FILE remote:`),
+the next run will see it on the remote and mark it, or delete it by hand if it's not needed.
 
 ### **Debug Mode**
 ```bash

@@ -5,6 +5,8 @@
 
 set -euo pipefail
 
+CONFIG_FILE="${HEDGII_CONFIG_FILE:-/etc/hedgii/hedgii_config.json}"
+
 # Colors for kawaii output
 PINK='\033[1;35m'
 GREEN='\033[1;32m'
@@ -73,12 +75,12 @@ check_hedgii_installation() {
         else
             doctor_log "FAIL" "Script not executable"
             doctor_log "FIX" "Run: sudo chmod +x /usr/local/bin/hedgii"
-            ((issues++))
+            issues=$((issues + 1))
         fi
     else
         doctor_log "FAIL" "Main script not found"
         doctor_log "FIX" "Run the installer: sudo ./install.sh"
-        ((issues++))
+        issues=$((issues + 1))
     fi
     
     # Check symlink
@@ -103,12 +105,12 @@ check_hedgii_installation() {
             else
                 doctor_log "FAIL" "Configuration JSON is invalid"
                 doctor_log "FIX" "Check syntax: jq . /etc/hedgii/hedgii_config.json"
-                ((issues++))
+                issues=$((issues + 1))
             fi
         else
             doctor_log "FAIL" "Configuration file missing"
             doctor_log "FIX" "Copy example config or run installer"
-            ((issues++))
+            issues=$((issues + 1))
         fi
         
         # Check GPG passphrase
@@ -125,12 +127,12 @@ check_hedgii_installation() {
         else
             doctor_log "FAIL" "GPG passphrase file missing"
             doctor_log "FIX" "Create passphrase file or run installer"
-            ((issues++))
+            issues=$((issues + 1))
         fi
     else
         doctor_log "FAIL" "Configuration directory missing"
         doctor_log "FIX" "Run: sudo mkdir -p /etc/hedgii"
-        ((issues++))
+        issues=$((issues + 1))
     fi
     
     echo ""
@@ -231,7 +233,7 @@ check_cron_jobs() {
     else
         doctor_log "FAIL" "Cron job file missing"
         doctor_log "FIX" "Re-run installer or create manually"
-        ((cron_issues++))
+        cron_issues=$((cron_issues + 1))
     fi
     
     # Check cron service
@@ -240,7 +242,7 @@ check_cron_jobs() {
     else
         doctor_log "FAIL" "Cron service not running"
         doctor_log "FIX" "Start cron: sudo systemctl start cron"
-        ((cron_issues++))
+        cron_issues=$((cron_issues + 1))
     fi
     
     echo ""
@@ -268,7 +270,19 @@ check_disk_space() {
             fi
         fi
     done
-    
+
+    local cfg="/etc/hedgii/hedgii_config.json"
+    if [[ -f "$cfg" ]] && command -v jq >/dev/null 2>&1; then
+        local bdir=$(jq -r '.settings.backup_dir // "/var/backups/hedgii"' "$cfg" 2>/dev/null)
+        local f
+        for f in "$bdir"/hedgii_backup_*.gpg; do
+            [[ -f "$f" ]] || continue
+            if [[ ! -f "$f.uploaded" ]]; then
+                doctor_log "WARN" "Archive never uploaded (never auto-deleted): $f"
+            fi
+        done
+    fi
+
     echo ""
 }
 
@@ -287,27 +301,54 @@ test_sync_clients() {
         local rclone_version=$(rclone version 2>/dev/null | head -1 || echo "unknown")
         echo "      Version: $rclone_version"
 
-        # Test rclone remotes
-        local remotes=$(rclone listremotes 2>/dev/null)
-        if [[ -n "$remotes" ]]; then
-            local remote_count=$(echo "$remotes" | wc -l)
-            doctor_log "OK" "rclone has $remote_count remotes configured"
-
-            # Test first remote connection
-            local first_remote=$(echo "$remotes" | head -1)
-            if [[ -n "$first_remote" ]]; then
-                doctor_log "INFO" "Testing connection to $first_remote..."
-                if timeout 10 rclone ls "$first_remote" >/dev/null 2>&1; then
-                    doctor_log "OK" "rclone connection successful"
-                else
-                    doctor_log "WARN" "rclone connection failed or timed out"
-                    doctor_log "FIX" "Check: rclone config reconnect $first_remote"
-                    ((sync_issues++))
-                fi
+        # Test the configured rclone remote (exact name, write probe)
+        local rclone_cfg rclone_remote rclone_timeout remote_name
+        # Same resolution as hedgii.sh get_rclone_config (legacy root config for older installs)
+        rclone_cfg=$(jq -r '.settings.rclone_config // empty' "$CONFIG_FILE" 2>/dev/null || true)
+        if [[ -z "$rclone_cfg" ]]; then
+            rclone_cfg="/etc/hedgii/rclone.conf"
+            if [[ ! -f "$rclone_cfg" && -f /root/.config/rclone/rclone.conf ]]; then
+                rclone_cfg="/root/.config/rclone/rclone.conf"
+                doctor_log "WARN" "Using legacy rclone config $rclone_cfg"
+                doctor_log "FIX" "Migrate it: sudo hedgii setup-rclone"
             fi
+        fi
+        rclone_remote=$(jq -r '.settings.rclone_remote // "onedrive:hedgii-backups/"' "$CONFIG_FILE" 2>/dev/null || echo "onedrive:hedgii-backups/")
+        rclone_timeout=$(jq -r '.settings.rclone_timeout // 60' "$CONFIG_FILE" 2>/dev/null || echo 60)
+        [[ "$rclone_timeout" =~ ^[0-9]+$ ]] || rclone_timeout=60
+        remote_name="${rclone_remote%%:*}"
+
+        if [[ ! -f "$rclone_cfg" ]]; then
+            doctor_log "WARN" "rclone config not found: $rclone_cfg"
+            doctor_log "FIX" "Run: sudo hedgii setup-rclone"
+            sync_issues=$((sync_issues + 1))
+        elif ! rclone --config "$rclone_cfg" listremotes 2>/dev/null | grep -Fxq "${remote_name}:"; then
+            doctor_log "WARN" "Configured remote '${remote_name}' not found in $rclone_cfg"
+            doctor_log "FIX" "Run: sudo hedgii setup-rclone"
+            sync_issues=$((sync_issues + 1))
         else
-            doctor_log "WARN" "No rclone remotes configured"
-            doctor_log "FIX" "Configure cloud storage: rclone config"
+            doctor_log "OK" "rclone remote '${remote_name}' present in $rclone_cfg"
+            [[ "$rclone_remote" == */ || "$rclone_remote" == *: ]] || rclone_remote="$rclone_remote/"
+            local probe_name=".hedgii-probe-$(date +%Y%m%d_%H%M%S)"
+            local probe_file probe_out content="hedgii-doctor-$$-$RANDOM"
+            probe_file=$(mktemp)
+            echo "$content" > "$probe_file"
+            doctor_log "INFO" "Testing write access on $rclone_remote (timeout ${rclone_timeout}s)..."
+            if probe_out=$(timeout "$rclone_timeout" rclone --config "$rclone_cfg" copyto "$probe_file" "${rclone_remote}${probe_name}" 2>&1) \
+                && probe_out=$(timeout "$rclone_timeout" rclone --config "$rclone_cfg" cat "${rclone_remote}${probe_name}" 2>&1) \
+                && [[ "$probe_out" == "$content" ]]; then
+                doctor_log "OK" "rclone remote is readable and writable"
+            else
+                doctor_log "WARN" "rclone write test failed: $probe_out"
+                if echo "$probe_out" | grep -Eqi 'invalid_grant|token expired|expired token|401|unauthorized'; then
+                    doctor_log "FIX" "Token expired: rclone config reconnect ${remote_name}: --config $rclone_cfg"
+                else
+                    doctor_log "FIX" "Run: sudo hedgii setup-rclone"
+                fi
+                sync_issues=$((sync_issues + 1))
+            fi
+            timeout "$rclone_timeout" rclone --config "$rclone_cfg" deletefile "${rclone_remote}${probe_name}" >/dev/null 2>&1 || true
+            rm -f "$probe_file"
         fi
     else
         doctor_log "WARN" "rclone not installed"
@@ -343,7 +384,7 @@ test_sync_clients() {
             else
                 doctor_log "WARN" "OneDrive connection failed"
                 doctor_log "FIX" "Re-authenticate: sudo onedrive --confdir='$onedrive_config_dir' --auth-files"
-                ((sync_issues++))
+                sync_issues=$((sync_issues + 1))
             fi
         else
             doctor_log "WARN" "OneDrive client not configured"
@@ -364,7 +405,7 @@ test_sync_clients() {
             if [[ ! " ${available_clients[*]} " =~ " $sync_method " ]]; then
                 doctor_log "FAIL" "Configured sync method '$sync_method' not available"
                 doctor_log "FIX" "Change sync method: hedgii setup-sync"
-                ((sync_issues++))
+                sync_issues=$((sync_issues + 1))
             fi
         fi
     fi
@@ -373,7 +414,7 @@ test_sync_clients() {
     if [[ ${#available_clients[@]} -eq 0 ]]; then
         doctor_log "FAIL" "No sync clients available"
         doctor_log "FIX" "Install at least one: rclone or OneDrive client"
-        ((sync_issues++))
+        sync_issues=$((sync_issues + 1))
     else
         doctor_log "INFO" "Available sync clients: ${available_clients[*]}"
     fi
@@ -440,25 +481,22 @@ main() {
     show_welcome
     check_system_info
 
+    # Each check returns its issue count: "|| ..." keeps set -e from stopping at the first issue
     local total_issues=0
 
-    check_hedgii_installation
-    total_issues=$((total_issues + $?))
+    check_hedgii_installation || total_issues=$((total_issues + $?))
 
-    check_dependencies
-    total_issues=$((total_issues + $?))
+    check_dependencies || total_issues=$((total_issues + $?))
 
     check_repositories
 
-    check_cron_jobs
-    total_issues=$((total_issues + $?))
+    check_cron_jobs || total_issues=$((total_issues + $?))
 
     check_disk_space
 
-    test_sync_clients
-    total_issues=$((total_issues + $?))
+    test_sync_clients || total_issues=$((total_issues + $?))
     
-    test_backup
+    test_backup || total_issues=$((total_issues + 1))
     
     show_summary $total_issues
 }
