@@ -1503,7 +1503,22 @@ hedgii_curl_run() {
 # verify: prove that a backup can actually be restored
 # ---------------------------------------------------------------------------
 
+# Free disk space verify needs in <work_dir>: the download (remote) plus, for ZIP only, the
+# decrypted copy (unzip needs a seekable file). TAR.GZ is checked as a stream, without a copy.
+verify_require_space() {
+    local work_dir="$1" archive_name="$2" archive_bytes="$3" source="$4" ratio need=0
+    ratio=$(jq -r '.settings.min_free_space_ratio // 1.2' "$CONFIG_FILE")
+    if awk -v r="$ratio" 'BEGIN { exit !(r <= 0) }'; then
+        return 0
+    fi
+    [[ "$source" == "remote" ]] && need=$((need + archive_bytes))
+    [[ "$archive_name" == *.zip.gpg ]] && need=$((need + archive_bytes))
+    [[ "$need" -gt 0 ]] || return 0
+    require_free_space "verify" "$work_dir" "$need" >&2
+}
+
 # Download (remote) or pick (local) the archive to check. Prints its path on stdout.
+# Returns 1 when there is nothing to verify or the download fails, 2 when disk space is too low.
 verify_fetch_archive() {
     local source="$1" name="$2" work_dir="$3"
     local backup_dir
@@ -1517,7 +1532,11 @@ verify_fetch_archive() {
             name=$(hedgii_rclone lsf "$remote" --files-only --include 'hedgii_backup_*.gpg' 2>>"$LOG_FILE" | sort | tail -n1) || name=""
             [[ -n "$name" ]] || { hedgii_log "ERROR" "No archive found on $remote" >&2; return 1; }
         fi
-        hedgii_log "INFO" "📥 Downloading $name from $remote..." >&2
+        local bytes
+        bytes=$(hedgii_rclone lsf --format s "${remote%/}/$name" 2>>"$LOG_FILE" | head -n1) || bytes=""
+        [[ "$bytes" =~ ^[0-9]+$ ]] || { hedgii_log "ERROR" "Archive not found on the remote: ${remote%/}/$name" >&2; return 1; }
+        verify_require_space "$work_dir" "$name" "$bytes" remote || return 2
+        hedgii_log "INFO" "📥 Downloading $name ($(human_size "$bytes")) from $remote..." >&2
         if ! hedgii_rclone copyto "${remote%/}/$name" "$work_dir/$name" 2>>"$LOG_FILE"; then
             hedgii_log "ERROR" "Download failed: ${remote%/}/$name" >&2
             return 1
@@ -1531,6 +1550,7 @@ verify_fetch_archive() {
             archive=$(list_archives "$backup_dir" | head -n1)
         fi
         [[ -n "$archive" && -f "$archive" ]] || { hedgii_log "ERROR" "No local archive found${name:+: $name}" >&2; return 1; }
+        verify_require_space "$work_dir" "$(basename "$archive")" "$(stat -c %s "$archive")" local || return 2
         echo "$archive"
     fi
 }
@@ -1541,30 +1561,45 @@ verify_archive() {
     local passphrase_file listing expected actual report_file="$work_dir/report.txt"
     passphrase_file=$(jq -r '.settings.encrypt_passphrase_file' "$CONFIG_FILE")
 
-    hedgii_log "INFO" "🔓 Decrypting $(basename "$archive")..."
-    if ! gpg --batch --quiet --passphrase-file "$passphrase_file" --decrypt "$archive" \
-        > "$work_dir/archive" 2>>"$LOG_FILE"; then
-        hedgii_log "ERROR" "Decryption failed (wrong passphrase, truncated or corrupted archive)"
-        return 1
-    fi
-
+    hedgii_log "INFO" "🔓 Decrypting and checking $(basename "$archive")..."
     case "$archive" in
         *.zip.gpg)
             command -v unzip >/dev/null 2>&1 || { hedgii_log "ERROR" "unzip is required to verify ZIP backups"; return 1; }
+            # unzip needs a seekable file: the decrypted copy is written (space checked beforehand)
+            if ! gpg --batch --quiet --passphrase-file "$passphrase_file" --decrypt "$archive" \
+                > "$work_dir/archive" 2>>"$LOG_FILE"; then
+                hedgii_log "ERROR" "Decryption failed (wrong passphrase, truncated or corrupted archive)"
+                return 1
+            fi
             if ! unzip -tq "$work_dir/archive" >>"$LOG_FILE" 2>&1; then
                 hedgii_log "ERROR" "ZIP integrity test failed"
                 return 1
             fi
             listing=$(unzip -Z1 "$work_dir/archive" | grep -v '/$' || true)
             unzip -p "$work_dir/archive" hedgii_backup_report.txt > "$report_file" 2>/dev/null || true
+            rm -f "$work_dir/archive"
             ;;
         *.tar.gz.gpg)
-            if ! listing=$(tar -tvzf "$work_dir/archive" 2>>"$LOG_FILE"); then
-                hedgii_log "ERROR" "TAR.GZ integrity test failed"
+            # Streamed: no decrypted copy on disk. Two passes (listing, then the report) cost a
+            # second decryption but never more disk than the .gpg itself.
+            local -a status=()
+            { gpg --batch --quiet --passphrase-file "$passphrase_file" --decrypt "$archive" 2>>"$LOG_FILE" \
+                | tar -tvzf - > "$work_dir/listing" 2>>"$LOG_FILE"
+              status=("${PIPESTATUS[@]}"); } || true
+            # gpg first: a failed decryption also breaks tar's input
+            if [[ "${status[0]:-1}" -ne 0 ]]; then
+                hedgii_log "ERROR" "Decryption failed (gpg exit code ${status[0]:-?}: wrong passphrase, truncated or corrupted archive)"
                 return 1
             fi
-            listing=$(grep '^-' <<<"$listing" || true)
-            tar -xzf "$work_dir/archive" -O ./hedgii_backup_report.txt > "$report_file" 2>/dev/null || true
+            if [[ "${status[1]:-1}" -ne 0 ]]; then
+                hedgii_log "ERROR" "TAR.GZ integrity test failed (tar exit code ${status[1]:-?})"
+                return 1
+            fi
+            # Regular files and hard links: in direct mode tar stores the second name of a
+            # hard-linked file (Maildir messages in two folders...) as an "h" entry
+            listing=$(grep '^[-h]' "$work_dir/listing" || true)
+            gpg --batch --quiet --passphrase-file "$passphrase_file" --decrypt "$archive" 2>>"$LOG_FILE" \
+                | tar -xzf - -O ./hedgii_backup_report.txt > "$report_file" 2>/dev/null || true
             ;;
         *)
             hedgii_log "ERROR" "Unknown archive format: $(basename "$archive")"
@@ -1613,15 +1648,22 @@ hedgii_verify() {
     STAGING_DIR="$work_dir"
 
     hedgii_log "KAWAII" "🔍 Verifying the latest $source backup..."
-    local archive rc=0
-    if ! archive=$(verify_fetch_archive "$source" "$name" "$work_dir"); then
+    local archive="" rc=0 fetch_rc=0
+    archive=$(verify_fetch_archive "$source" "$name" "$work_dir") || fetch_rc=$?
+    if [[ $fetch_rc -eq 2 ]]; then
+        rc=$EXIT_NO_SPACE
+        archive=""
+    elif [[ $fetch_rc -ne 0 ]]; then
         rc=$EXIT_VERIFY_FAILED
+        archive=""
     elif ! verify_archive "$archive" "$work_dir"; then
         rc=$EXIT_VERIFY_FAILED
     fi
 
     local level="success" icon="✅" result="restorable"
-    if [[ $rc -ne 0 ]]; then
+    if [[ $rc -eq $EXIT_NO_SPACE ]]; then
+        level="failure"; icon="❌"; result="not checked: not enough free disk space"
+    elif [[ $rc -ne 0 ]]; then
         level="failure"; icon="❌"; result="NOT restorable"
     fi
     hedgii_log "INFO" "SUMMARY verify=$level source=$source archive=$(basename "${archive:-none}")"
