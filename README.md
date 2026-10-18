@@ -832,6 +832,19 @@ Hedgii can execute any shell command as part of your backup:
 
 ---
 
+## 🔔 Notifications
+
+Add a `notifications` block to your config (see `config/hedgii_config.json.example`):
+
+- `on`: levels that trigger a message (`failure`, `warning`, `success`)
+- `discord_webhook` (or `discord_webhook_file` to read it from a `chmod 600` file)
+- `telegram.bot_token_file` (`chmod 600`) and `telegram.chat_id`
+- `ping_url`: healthchecks.io / Uptime Kuma push URL (`/start`, success, `/fail`)
+
+Messages include host, duration, archive size, destination, exit code and last errors.
+A notification failure is logged as WARN and never fails the backup.
+Validate with `hedgii test-notify`.
+
 ## 📊 Monitoring & Reporting
 
 Every Hedgii backup includes:

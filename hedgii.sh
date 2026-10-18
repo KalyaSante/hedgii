@@ -1073,8 +1073,148 @@ hedgii_peek() {
     warn_unsent_archives "$backup_dir"
 }
 
+# ---------------------------------------------------------------------------
+# Notifications (Discord, Telegram, ping URL / dead man's switch)
+# Failures here are logged as WARN and never fail the backup.
+# ---------------------------------------------------------------------------
+
+notif_cfg() {
+    jq -r "$1 // empty" "$CONFIG_FILE" 2>/dev/null || true
+}
+
+# Read a secret from a file (must not be group/world accessible)
+notif_read_secret() {
+    local file="$1"
+    [[ -n "$file" && -r "$file" ]] || return 1
+    local perms
+    perms=$(stat -c '%a' "$file" 2>/dev/null || echo "")
+    if [[ -n "$perms" && "${perms: -2}" != "00" ]]; then
+        hedgii_log "WARN" "Secret file $file has permissions $perms (expected 600)"
+    fi
+    tr -d '\r\n' < "$file"
+}
+
+# Should we notify for this level (failure|warning|success)?
+notif_enabled_for() {
+    local level="$1"
+    jq -e --arg l "$level" '(.notifications.on // ["failure","warning"]) | index($l) != null' \
+        "$CONFIG_FILE" >/dev/null 2>&1
+}
+
+notif_http_post() {
+    # $1=url, rest = curl args
+    local url="$1"; shift
+    curl -fsS -m 20 --retry 2 -o /dev/null "$@" "$url" 2>/dev/null
+}
+
+# Public: ping_url [start|fail|success]
+notif_ping() {
+    local kind="$1" url
+    url=$(notif_cfg '.notifications.ping_url')
+    [[ -n "$url" ]] || return 0
+    command -v curl >/dev/null 2>&1 || return 0
+    url="${url%/}"
+    case "$kind" in
+        start) url="$url/start" ;;
+        fail)  url="$url/fail" ;;
+    esac
+    if ! notif_http_post "$url"; then
+        hedgii_log "WARN" "Ping ($kind) failed"
+    fi
+    return 0
+}
+
+# Public: notify_message <message>  -> sends to Discord and Telegram
+# Returns number of channels that failed (0 = all good / none configured)
+notif_send() {
+    local message="$1" failed=0
+    command -v curl >/dev/null 2>&1 || { hedgii_log "WARN" "curl missing, notifications disabled"; return 0; }
+
+    local webhook
+    webhook=$(notif_cfg '.notifications.discord_webhook_file')
+    if [[ -n "$webhook" ]]; then
+        webhook=$(notif_read_secret "$webhook" || true)
+    else
+        webhook=$(notif_cfg '.notifications.discord_webhook')
+    fi
+    if [[ -n "$webhook" ]]; then
+        local payload
+        payload=$(jq -n --arg c "${message:0:1900}" '{content: $c}')
+        if notif_http_post "$webhook" -H 'Content-Type: application/json' -d "$payload"; then
+            NOTIF_SENT+=("discord")
+        else
+            hedgii_log "WARN" "Discord notification failed"; failed=$((failed+1))
+        fi
+    fi
+
+    local tg_file tg_chat
+    tg_file=$(notif_cfg '.notifications.telegram.bot_token_file')
+    tg_chat=$(notif_cfg '.notifications.telegram.chat_id')
+    if [[ -n "$tg_file" && -n "$tg_chat" ]]; then
+        local token
+        token=$(notif_read_secret "$tg_file" || true)
+        if [[ -z "$token" ]]; then
+            hedgii_log "WARN" "Telegram token file unreadable or empty: $tg_file"; failed=$((failed+1))
+        else
+            # Token passed through a curl config on stdin to keep it out of the process list
+            if printf 'url = "https://api.telegram.org/bot%s/sendMessage"\n' "$token" \
+                | curl -fsS -m 20 --retry 2 -o /dev/null -K - \
+                    --data-urlencode "chat_id=$tg_chat" \
+                    --data-urlencode "text=${message:0:4000}" 2>/dev/null; then
+                NOTIF_SENT+=("telegram")
+            else
+                hedgii_log "WARN" "Telegram notification failed"; failed=$((failed+1))
+            fi
+        fi
+    fi
+    return $failed
+}
+
+# Public: notify_backup_result <level> <exit_code> <start_epoch> <archive> <destination>
+notif_backup_result() {
+    local level="$1" code="$2" start="$3" archive="$4" dest="$5"
+    notif_enabled_for "$level" || return 0
+    local duration=$(( $(date +%s) - start )) size="n/a" icon="✅"
+    [[ -n "$archive" && -f "$archive" ]] && size=$(du -h "$archive" | cut -f1)
+    [[ "$level" == "failure" ]] && icon="❌"
+    [[ "$level" == "warning" ]] && icon="⚠️"
+    local errors=""
+    errors=$(grep -E '\[(ERROR|WARN)\]' "$LOG_FILE" 2>/dev/null | tail -n 5 || true)
+    local msg
+    msg="$icon Hedgii backup ${level} on $(hostname)
+Duration: ${duration}s
+Archive size: ${size}
+Destination: ${dest:-n/a}
+Exit code: ${code}"
+    [[ -n "$errors" ]] && msg+=$'\n'"Last errors:"$'\n'"$errors"
+    NOTIF_SENT=()
+    notif_send "$msg" || true
+    return 0
+}
+
+# hedgii test-notify
+hedgii_test_notify() {
+    NOTIF_SENT=()
+    local configured=0
+    jq -e '.notifications' "$CONFIG_FILE" >/dev/null 2>&1 || {
+        hedgii_log "WARN" "No notifications block in $CONFIG_FILE"; return 1; }
+    local rc=0
+    notif_send "🦔 Hedgii test notification from $(hostname) at $(date '+%Y-%m-%d %H:%M:%S')" || rc=$?
+    if [[ -n "$(notif_cfg '.notifications.ping_url')" ]]; then
+        configured=1
+        notif_ping success
+    fi
+    if [[ ${#NOTIF_SENT[@]} -eq 0 && $configured -eq 0 && $rc -eq 0 ]]; then
+        hedgii_log "WARN" "No notification channel configured"
+        return 1
+    fi
+    [[ ${#NOTIF_SENT[@]} -gt 0 ]] && hedgii_log "INFO" "Test message sent to: ${NOTIF_SENT[*]}"
+    [[ $rc -eq 0 ]] || return 1
+    return 0
+}
+
 # Main backup function with multi-sync support
-hedgii_curl() {
+hedgii_curl_run() {
     hedgii_log "KAWAII" "🦔 Hedgii is ready to protect your data with enhanced sync powers! ✨"
 
     local start_time=$SECONDS
@@ -1084,8 +1224,10 @@ hedgii_curl() {
 
     local staging_dir
     staging_dir=$(cleanup_staging) || exit $EXIT_CONFIG_ERROR
-    # Removed by cleanup_on_exit, on every exit path
+    # Removed by cleanup_on_exit on every exit path. The trap is set again here because
+    # hedgii_curl runs this function in a subshell, and subshells don't inherit EXIT traps.
     STAGING_DIR="$staging_dir"
+    trap cleanup_on_exit EXIT
 
     # Use enhanced processing with custom commands
     if ! process_sources_with_commands "$staging_dir"; then
@@ -1120,6 +1262,42 @@ hedgii_curl() {
         hedgii_log "ERROR" "SUMMARY status=upload_failed duration=${duration}s size=$size destination=$destination file=$encrypted_file"
         exit $EXIT_UPLOAD_FAILED
     fi
+}
+
+# Backup wrapper: ping + notifications around the actual run
+hedgii_curl() {
+    local start_epoch
+    start_epoch=$(date +%s)
+    notif_ping start
+
+    # Not "( ... ) || rc=$?": inside an || list bash ignores set -e for the whole subshell,
+    # so a failing command in the backup would no longer stop it
+    local rc
+    set +e
+    ( set -e; hedgii_curl_run )
+    rc=$?
+    set -e
+
+    local backup_dir archive dest
+    backup_dir=$(jq -r '.settings.backup_dir // "/var/backups/hedgii"' "$CONFIG_FILE" 2>/dev/null || echo "")
+    archive=$(ls -1 "$backup_dir"/hedgii_backup_"${DATE}".*.gpg 2>/dev/null | head -n1 || true)
+    dest=$(jq -r '.settings.rclone_remote // .settings.onedrive_backup_dir // empty' "$CONFIG_FILE" 2>/dev/null || true)
+
+    if [[ $rc -ne 0 ]]; then
+        notif_ping fail
+        notif_backup_result failure "$rc" "$start_epoch" "$archive" "$dest"
+    else
+        notif_ping success
+        # A successful run that logged errors (failed non-blocking command...) or left an
+        # archive behind is reported as a warning. Plain WARN lines don't count: tools like
+        # mysqldump write harmless warnings to stderr on every run.
+        if grep -qE '\[ERROR\]|Archive never uploaded' "$LOG_FILE" 2>/dev/null; then
+            notif_backup_result warning 0 "$start_epoch" "$archive" "$dest"
+        else
+            notif_backup_result success 0 "$start_epoch" "$archive" "$dest"
+        fi
+    fi
+    return $rc
 }
 
 # Interactive sync method selection
@@ -1499,6 +1677,10 @@ case "${1:-curl}" in
     "compression-info")
         show_compression_info
         ;;
+    "test-notify")
+        hedgii_log "KAWAII" "📣 Testing notifications..."
+        hedgii_test_notify
+        ;;
     *)
         echo "🦔 Hedgii Commands:"
         echo "  curl              - Backup your data with enhanced sync (default)"
@@ -1510,6 +1692,7 @@ case "${1:-curl}" in
         echo "  edit-config       - Edit configuration with nano"
         echo "  change-passphrase - Change GPG encryption passphrase"
         echo "  compression-info  - Show current compression format information"
+        echo "  test-notify       - Send a test message on each configured notification channel"
         echo ""
         echo "🔄 Sync Commands:"
         echo "  test-sync         - Test available sync clients"
