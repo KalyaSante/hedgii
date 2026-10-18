@@ -427,23 +427,36 @@ test_sync_clients() {
     done
 }
 
-# Cleanup staging directory
-cleanup_staging() {
-    local staging_dir=$(jq -r '.settings.staging_dir // "/tmp/hedgii_staging"' "$CONFIG_FILE")
-
-    hedgii_log "INFO" "Cleaning staging directory..." >&2
-
-    # Remove existing staging directory
-    if [[ -d "$staging_dir" ]]; then
-        rm -rf "$staging_dir"
-        hedgii_log "INFO" "Removed existing staging directory" >&2
+# Exclusive lock: only one hedgii run at a time (exit code 5 if already running)
+HEDGII_LOCK_FILE="${HEDGII_LOCK_FILE:-/run/hedgii.lock}"
+acquire_lock() {
+    if ! exec 9>"$HEDGII_LOCK_FILE"; then
+        hedgii_log "ERROR" "Cannot open lock file $HEDGII_LOCK_FILE"
+        exit 1
     fi
+    if ! flock -n 9; then
+        hedgii_log "ERROR" "Another Hedgii run is already in progress (lock: $HEDGII_LOCK_FILE)"
+        exit 5
+    fi
+}
 
-    # Create fresh staging directory
-    mkdir -p "$staging_dir"
+# Remove the per-run staging directory on exit
+STAGING_DIR_RUN=""
+cleanup_run_staging() {
+    [[ -n "$STAGING_DIR_RUN" && -d "$STAGING_DIR_RUN" ]] && rm -rf "$STAGING_DIR_RUN"
+    return 0
+}
+
+# Create a unique staging directory for this run
+cleanup_staging() {
+    local staging_base=$(jq -r '.settings.staging_dir // "/tmp/hedgii_staging"' "$CONFIG_FILE")
+
+    # Unique staging directory per run (never shared between runs)
+    local staging_dir
+    mkdir -p "$(dirname "$staging_base")"
+    staging_dir=$(mktemp -d "${staging_base}.XXXXXX") || return 1
     hedgii_log "INFO" "Created clean staging directory: $staging_dir" >&2
 
-    # 🔧 CORRECTION : Retourner SEULEMENT le chemin sur stdout
     echo "$staging_dir"
 }
 
@@ -725,9 +738,13 @@ encrypt_staging() {
 hedgii_curl() {
     hedgii_log "KAWAII" "🦔 Hedgii is ready to protect your data with enhanced sync powers! ✨"
 
+    acquire_lock
     check_dependencies
 
-    local staging_dir=$(cleanup_staging)
+    local staging_dir
+    staging_dir=$(cleanup_staging) || exit 1
+    STAGING_DIR_RUN="$staging_dir"
+    trap cleanup_run_staging EXIT
 
     # Use enhanced processing with custom commands
     if ! process_sources_with_commands "$staging_dir"; then
@@ -1042,7 +1059,8 @@ case "${1:-curl}" in
         ;;
     "test-commands")
         hedgii_log "KAWAII" "🦔 Testing custom commands without full backup..."
-        local staging_dir=$(cleanup_staging)
+        acquire_lock
+        staging_dir=$(cleanup_staging) || exit 1
         execute_custom_commands "$staging_dir"
         hedgii_log "INFO" "Check results in: $staging_dir"
         ;;
